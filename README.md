@@ -12,6 +12,20 @@ A Go CLI for managing a persistent SQLite-backed background job queue.
 queuectl enqueue '{"id":"job1","command":"sleep 2"}'
 ```
 
+### List jobs
+
+You can list jobs by their state (e.g., pending, processing, completed, failed, dead):
+
+```sh
+queuectl list --state pending
+```
+
+For machine-readable output, append `--json`:
+
+```sh
+queuectl list --state pending --json
+```
+
 Jobs persist in the SQLite database at `./queuectl.db` by default.
 Set `QUEUECTL_DB_PATH` to override the database location.
 

@@ -18,7 +18,7 @@ func TestOpenCreatesNewSQLiteDatabase(t *testing.T) {
 
 	store, err := Open(path)
 	require.NoError(t, err)
-	
+
 	err = store.Close()
 	require.NoError(t, err)
 
@@ -249,7 +249,7 @@ func TestOpenRejectsNewerSchemaVersion(t *testing.T) {
 	path := testDBPath(t)
 	store, err := Open(path)
 	require.NoError(t, err)
-	
+
 	_, err = store.db.Exec("INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)", latestMigrationVersion+1, 1)
 	require.NoError(t, err)
 	require.NoError(t, store.Close())
@@ -625,6 +625,110 @@ func TestEnqueuePreservesCommandWhitespace(t *testing.T) {
 	job, err := s.Enqueue(ctx, "job-1", "  echo hello  ")
 	require.NoError(t, err)
 	assert.Equal(t, "  echo hello  ", job.Command)
+}
+
+// --- ListJobsByState tests ---
+
+func TestListJobsByStateReturnsOnlyRequestedState(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+
+	insertJob(t, s, "job-1", JobStatePending, 0, 3, 2)
+	insertJob(t, s, "job-2", JobStateCompleted, 0, 3, 2)
+	insertJob(t, s, "job-3", JobStatePending, 0, 3, 2)
+
+	jobs, err := s.ListJobsByState(ctx, JobStatePending)
+	require.NoError(t, err)
+
+	assert.Len(t, jobs, 2)
+	assert.Equal(t, "job-1", jobs[0].ID)
+	assert.Equal(t, "job-3", jobs[1].ID)
+}
+
+func TestListJobsByStateEmptySliceWhenNoMatch(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+
+	insertJob(t, s, "job-1", JobStateCompleted, 0, 3, 2)
+
+	jobs, err := s.ListJobsByState(ctx, JobStatePending)
+	require.NoError(t, err)
+
+	require.NotNil(t, jobs)
+	assert.Empty(t, jobs)
+}
+
+func TestListJobsByStateRejectsInvalidState(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+
+	jobs, err := s.ListJobsByState(ctx, "unknown")
+	assert.Error(t, err)
+	assert.Nil(t, jobs)
+	assert.ErrorContains(t, err, "invalid job state")
+}
+
+func TestListJobsByStateDeterministicOrder(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+
+	// Insert manually to control created_at
+	_, err := s.db.Exec(`INSERT INTO jobs (id, command, state, attempts, max_retries, backoff_base, created_at, updated_at)
+		VALUES 
+		('job-C', 'cmd', 'pending', 0, 3, 2, 100, 100),
+		('job-A', 'cmd', 'pending', 0, 3, 2, 200, 200),
+		('job-D', 'cmd', 'pending', 0, 3, 2, 100, 100),
+		('job-B', 'cmd', 'pending', 0, 3, 2, 50, 50)`)
+	require.NoError(t, err)
+
+	jobs, err := s.ListJobsByState(ctx, JobStatePending)
+	require.NoError(t, err)
+
+	require.Len(t, jobs, 4)
+
+	// Order should be: created_at ASC, id ASC
+	// 50: job-B
+	// 100: job-C, job-D (C then D)
+	// 200: job-A
+	assert.Equal(t, "job-B", jobs[0].ID)
+	assert.Equal(t, "job-C", jobs[1].ID)
+	assert.Equal(t, "job-D", jobs[2].ID)
+	assert.Equal(t, "job-A", jobs[3].ID)
+}
+
+func TestListJobsByStateScansNullableFields(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+
+	var workerID = "worker-1"
+	var t1 int64 = 1000
+	var t2 int64 = 2000
+	var t3 int64 = 3000
+	var t4 int64 = 4000
+	var exitCode = 1
+	var lastErr = "boom"
+
+	_, err := s.db.Exec(`INSERT INTO jobs (
+			id, command, state, attempts, max_retries, backoff_base, created_at, updated_at,
+			next_run_at, worker_id, lease_expires_at, started_at, completed_at, exit_code, last_error
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		"job-1", "cmd", JobStateCompleted, 2, 3, 2, 100, 200,
+		t1, workerID, t2, t3, t4, exitCode, lastErr,
+	)
+	require.NoError(t, err)
+
+	jobs, err := s.ListJobsByState(ctx, JobStateCompleted)
+	require.NoError(t, err)
+	require.Len(t, jobs, 1)
+
+	job := jobs[0]
+	assert.Equal(t, &t1, job.NextRunAt)
+	assert.Equal(t, &workerID, job.WorkerID)
+	assert.Equal(t, &t2, job.LeaseExpiresAt)
+	assert.Equal(t, &t3, job.StartedAt)
+	assert.Equal(t, &t4, job.CompletedAt)
+	assert.Equal(t, &exitCode, job.ExitCode)
+	assert.Equal(t, &lastErr, job.LastError)
 }
 
 // --- Test helpers ---

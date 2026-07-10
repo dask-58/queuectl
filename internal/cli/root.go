@@ -33,7 +33,7 @@ func newRootCommand(stdout, stderr io.Writer, getenv func(string) string) *cobra
 		newEnqueueCommand(getenv),
 		newWorkerCommand(),
 		newStatusCommand(),
-		newListCommand(),
+		newListCommand(getenv),
 		newDLQCommand(),
 		newConfigCommand(),
 	)
@@ -90,28 +90,6 @@ func newStatusCommand() *cobra.Command {
 			return ErrNotImplemented
 		},
 	}
-}
-
-func newListCommand() *cobra.Command {
-	var state string
-	var jsonOutput bool
-
-	cmd := &cobra.Command{
-		Use:   "list --state <state> [--json]",
-		Short: "List jobs",
-		Args:  cobra.NoArgs,
-		RunE: func(cmd *cobra.Command, args []string) error {
-			if state == "" {
-				return fmt.Errorf("required flag \"state\" not set")
-			}
-			return ErrNotImplemented
-		},
-	}
-
-	cmd.Flags().StringVar(&state, "state", "", "job state to list")
-	cmd.Flags().BoolVar(&jsonOutput, "json", false, "emit JSON output")
-
-	return cmd
 }
 
 func newDLQCommand() *cobra.Command {

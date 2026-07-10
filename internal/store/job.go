@@ -10,10 +10,26 @@ import (
 	"time"
 )
 
+const (
+	JobStatePending    = "pending"
+	JobStateProcessing = "processing"
+	JobStateCompleted  = "completed"
+	JobStateFailed     = "failed"
+	JobStateDead       = "dead"
+)
+
 var (
 	ErrJobAlreadyExists = errors.New("job already exists")
 	ErrJobNotFound      = errors.New("job not found")
 )
+
+func IsValidJobState(state string) bool {
+	switch state {
+	case JobStatePending, JobStateProcessing, JobStateCompleted, JobStateFailed, JobStateDead:
+		return true
+	}
+	return false
+}
 
 type Job struct {
 	ID             string
@@ -85,13 +101,30 @@ func (s *Store) Enqueue(ctx context.Context, id, command string) (*Job, error) {
 	return &Job{
 		ID:          id,
 		Command:     command,
-		State:       "pending",
+		State:       JobStatePending,
 		Attempts:    0,
 		MaxRetries:  maxRetries,
 		BackoffBase: backoffBase,
 		CreatedAt:   now,
 		UpdatedAt:   now,
 	}, nil
+}
+
+type scanner interface {
+	Scan(dest ...any) error
+}
+
+func scanJob(s scanner) (*Job, error) {
+	var j Job
+	err := s.Scan(
+		&j.ID, &j.Command, &j.State, &j.Attempts, &j.MaxRetries, &j.BackoffBase,
+		&j.CreatedAt, &j.UpdatedAt, &j.NextRunAt, &j.WorkerID,
+		&j.LeaseExpiresAt, &j.StartedAt, &j.CompletedAt, &j.ExitCode, &j.LastError,
+	)
+	if err != nil {
+		return nil, err
+	}
+	return &j, nil
 }
 
 func (s *Store) Job(ctx context.Context, id string) (*Job, error) {
@@ -101,12 +134,7 @@ func (s *Store) Job(ctx context.Context, id string) (*Job, error) {
 				lease_expires_at, started_at, completed_at, exit_code, last_error
 		 FROM jobs WHERE id = ?`, id)
 
-	var j Job
-	err := row.Scan(
-		&j.ID, &j.Command, &j.State, &j.Attempts, &j.MaxRetries, &j.BackoffBase,
-		&j.CreatedAt, &j.UpdatedAt, &j.NextRunAt, &j.WorkerID,
-		&j.LeaseExpiresAt, &j.StartedAt, &j.CompletedAt, &j.ExitCode, &j.LastError,
-	)
+	j, err := scanJob(row)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrJobNotFound
 	}
@@ -114,7 +142,37 @@ func (s *Store) Job(ctx context.Context, id string) (*Job, error) {
 		return nil, fmt.Errorf("query job: %w", err)
 	}
 
-	return &j, nil
+	return j, nil
+}
+
+func (s *Store) ListJobsByState(ctx context.Context, state string) ([]Job, error) {
+	if !IsValidJobState(state) {
+		return nil, fmt.Errorf("invalid job state: %q", state)
+	}
+
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id, command, state, attempts, max_retries, backoff_base,
+				created_at, updated_at, next_run_at, worker_id,
+				lease_expires_at, started_at, completed_at, exit_code, last_error
+		 FROM jobs WHERE state = ? ORDER BY created_at ASC, id ASC`, state)
+	if err != nil {
+		return nil, fmt.Errorf("query jobs by state: %w", err)
+	}
+	defer rows.Close()
+
+	jobs := make([]Job, 0)
+	for rows.Next() {
+		j, err := scanJob(rows)
+		if err != nil {
+			return nil, fmt.Errorf("scan job: %w", err)
+		}
+		jobs = append(jobs, *j)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate jobs: %w", err)
+	}
+
+	return jobs, nil
 }
 
 func readIntConfig(ctx context.Context, tx *sql.Tx, key string) (int, error) {
