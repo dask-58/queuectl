@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 
 	"github.com/spf13/cobra"
 )
@@ -11,6 +12,10 @@ import (
 var ErrNotImplemented = errors.New("command not implemented")
 
 func NewRootCommand(stdout, stderr io.Writer) *cobra.Command {
+	return newRootCommand(stdout, stderr, os.Getenv)
+}
+
+func newRootCommand(stdout, stderr io.Writer, getenv func(string) string) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:           "queuectl",
 		Short:         "Manage background jobs",
@@ -25,7 +30,7 @@ func NewRootCommand(stdout, stderr io.Writer) *cobra.Command {
 	cmd.SetErr(stderr)
 
 	cmd.AddCommand(
-		newEnqueueCommand(),
+		newEnqueueCommand(getenv),
 		newWorkerCommand(),
 		newStatusCommand(),
 		newListCommand(),
@@ -34,17 +39,6 @@ func NewRootCommand(stdout, stderr io.Writer) *cobra.Command {
 	)
 
 	return cmd
-}
-
-func newEnqueueCommand() *cobra.Command {
-	return &cobra.Command{
-		Use:   "enqueue <job-json>",
-		Short: "Enqueue a job",
-		Args:  cobra.ExactArgs(1),
-		RunE: func(cmd *cobra.Command, args []string) error {
-			return ErrNotImplemented
-		},
-	}
 }
 
 func newWorkerCommand() *cobra.Command {

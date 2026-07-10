@@ -1,64 +1,50 @@
 package store
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"os"
 	"path/filepath"
-	"strings"
 	"sync"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestOpenCreatesNewSQLiteDatabase(t *testing.T) {
 	path := testDBPath(t)
 
 	store, err := Open(path)
-	if err != nil {
-		t.Fatalf("open store: %v", err)
-	}
-	if err := store.Close(); err != nil {
-		t.Fatalf("close store: %v", err)
-	}
+	require.NoError(t, err)
+	
+	err = store.Close()
+	require.NoError(t, err)
 
-	if _, err := os.Stat(path); err != nil {
-		t.Fatalf("expected database file to exist: %v", err)
-	}
+	_, err = os.Stat(path)
+	assert.NoError(t, err, "expected database file to exist")
 }
 
 func TestOpenRejectsEmptyPath(t *testing.T) {
 	store, err := Open("")
-	if err == nil {
-		t.Fatal("expected error")
-	}
-	if store != nil {
-		t.Fatal("expected nil store")
-	}
-	if !strings.Contains(err.Error(), "database path") {
-		t.Fatalf("expected useful path error, got %v", err)
-	}
+	assert.Error(t, err)
+	assert.Nil(t, store)
+	assert.ErrorContains(t, err, "database path")
 }
 
 func TestOpenRejectsWhitespaceOnlyPath(t *testing.T) {
 	store, err := Open("   \t\n")
-	if err == nil {
-		t.Fatal("expected error")
-	}
-	if store != nil {
-		t.Fatal("expected nil store")
-	}
-	if !strings.Contains(err.Error(), "database path") {
-		t.Fatalf("expected useful path error, got %v", err)
-	}
+	assert.Error(t, err)
+	assert.Nil(t, store)
+	assert.ErrorContains(t, err, "database path")
 }
 
 func TestRequiredTablesExistAfterInitialization(t *testing.T) {
 	store := openTestStore(t)
 
 	for _, table := range []string{"schema_migrations", "jobs", "config", "workers"} {
-		if !tableExists(t, store, table) {
-			t.Fatalf("expected table %q to exist", table)
-		}
+		assert.True(t, tableExists(t, store, table), "expected table %q to exist", table)
 	}
 }
 
@@ -70,102 +56,68 @@ func TestIdxJobsStateExists(t *testing.T) {
 		"SELECT name FROM sqlite_master WHERE type = 'index' AND name = ?",
 		"idx_jobs_state",
 	).Scan(&name)
-	if errors.Is(err, sql.ErrNoRows) {
-		t.Fatal("expected idx_jobs_state index to exist")
-	}
-	if err != nil {
-		t.Fatalf("check index: %v", err)
-	}
+	require.NoError(t, err)
+	assert.Equal(t, "idx_jobs_state", name)
 }
 
 func TestMigrationVersionOneRecordedExactlyOnce(t *testing.T) {
 	store := openTestStore(t)
 
-	if count := countRows(t, store, "SELECT COUNT(*) FROM schema_migrations WHERE version = 1"); count != 1 {
-		t.Fatalf("expected migration 1 recorded once, got %d", count)
-	}
+	count := countRows(t, store, "SELECT COUNT(*) FROM schema_migrations WHERE version = 1")
+	assert.Equal(t, 1, count)
 }
 
 func TestCloseAndReopenDoesNotReapplyMigration(t *testing.T) {
 	path := testDBPath(t)
 
 	store, err := Open(path)
-	if err != nil {
-		t.Fatalf("open store: %v", err)
-	}
-	if err := store.Close(); err != nil {
-		t.Fatalf("close store: %v", err)
-	}
+	require.NoError(t, err)
+	require.NoError(t, store.Close())
 
 	reopened, err := Open(path)
-	if err != nil {
-		t.Fatalf("reopen store: %v", err)
-	}
+	require.NoError(t, err)
 	t.Cleanup(func() {
-		if err := reopened.Close(); err != nil {
-			t.Fatalf("close reopened store: %v", err)
-		}
+		require.NoError(t, reopened.Close())
 	})
 
-	if count := countRows(t, reopened, "SELECT COUNT(*) FROM schema_migrations WHERE version = 1"); count != 1 {
-		t.Fatalf("expected migration 1 recorded once, got %d", count)
-	}
+	count := countRows(t, reopened, "SELECT COUNT(*) FROM schema_migrations WHERE version = 1")
+	assert.Equal(t, 1, count)
 }
 
 func TestReopenDoesNotDuplicateDefaultConfig(t *testing.T) {
 	path := testDBPath(t)
 	store, err := Open(path)
-	if err != nil {
-		t.Fatalf("open store: %v", err)
-	}
-	if err := store.Close(); err != nil {
-		t.Fatalf("close store: %v", err)
-	}
+	require.NoError(t, err)
+	require.NoError(t, store.Close())
 
 	reopened, err := Open(path)
-	if err != nil {
-		t.Fatalf("reopen store: %v", err)
-	}
+	require.NoError(t, err)
 	t.Cleanup(func() {
-		if err := reopened.Close(); err != nil {
-			t.Fatalf("close reopened store: %v", err)
-		}
+		require.NoError(t, reopened.Close())
 	})
 
-	if count := countRows(t, reopened, "SELECT COUNT(*) FROM config"); count != 2 {
-		t.Fatalf("expected 2 config rows, got %d", count)
-	}
+	count := countRows(t, reopened, "SELECT COUNT(*) FROM config")
+	assert.Equal(t, 2, count)
 }
 
 func TestDirectlyWrittenDataSurvivesCloseAndReopen(t *testing.T) {
 	path := testDBPath(t)
 	store, err := Open(path)
-	if err != nil {
-		t.Fatalf("open store: %v", err)
-	}
+	require.NoError(t, err)
 
 	insertJob(t, store, "job-1", "pending", 0, 3, 2)
-	if err := store.Close(); err != nil {
-		t.Fatalf("close store: %v", err)
-	}
+	require.NoError(t, store.Close())
 
 	reopened, err := Open(path)
-	if err != nil {
-		t.Fatalf("reopen store: %v", err)
-	}
+	require.NoError(t, err)
 	t.Cleanup(func() {
-		if err := reopened.Close(); err != nil {
-			t.Fatalf("close reopened store: %v", err)
-		}
+		require.NoError(t, reopened.Close())
 	})
 
 	var command string
-	if err := reopened.db.QueryRow("SELECT command FROM jobs WHERE id = ?", "job-1").Scan(&command); err != nil {
-		t.Fatalf("read persisted job: %v", err)
-	}
-	if command != "echo hello" {
-		t.Fatalf("expected persisted command, got %q", command)
-	}
+	err = reopened.db.QueryRow("SELECT command FROM jobs WHERE id = ?", "job-1").Scan(&command)
+	require.NoError(t, err)
+	assert.Equal(t, "echo hello", command)
 }
 
 func TestDefaultConfigRowsExist(t *testing.T) {
@@ -181,12 +133,9 @@ func TestDefaultConfigRowsExist(t *testing.T) {
 
 	for _, d := range defaults {
 		var got string
-		if err := store.db.QueryRow("SELECT value FROM config WHERE key = ?", d.key).Scan(&got); err != nil {
-			t.Fatalf("read config %q: %v", d.key, err)
-		}
-		if got != d.value {
-			t.Fatalf("expected config %q = %q, got %q", d.key, d.value, got)
-		}
+		err := store.db.QueryRow("SELECT value FROM config WHERE key = ?", d.key).Scan(&got)
+		require.NoError(t, err, "read config %q", d.key)
+		assert.Equal(t, d.value, got, "config %q value mismatch", d.key)
 	}
 }
 
@@ -245,9 +194,7 @@ func TestJobConstraintsRejectInvalidValues(t *testing.T) {
 				1,
 				1,
 			)
-			if err == nil {
-				t.Fatal("expected constraint error")
-			}
+			assert.Error(t, err, "expected constraint error for %s", tt.name)
 		})
 	}
 }
@@ -276,64 +223,44 @@ func TestValidNullableLifecycleFieldsAreAccepted(t *testing.T) {
 		nil,
 		nil,
 	)
-	if err != nil {
-		t.Fatalf("insert job with nullable lifecycle fields: %v", err)
-	}
+	assert.NoError(t, err)
 }
 
 func TestSQLitePragmas(t *testing.T) {
 	store := openTestStore(t)
 
 	var journalMode string
-	if err := store.db.QueryRow("PRAGMA journal_mode").Scan(&journalMode); err != nil {
-		t.Fatalf("read journal_mode: %v", err)
-	}
-	if !strings.EqualFold(journalMode, "wal") {
-		t.Fatalf("expected journal_mode wal, got %q", journalMode)
-	}
+	err := store.db.QueryRow("PRAGMA journal_mode").Scan(&journalMode)
+	require.NoError(t, err)
+	assert.Equal(t, "wal", journalMode)
 
 	var foreignKeys int
-	if err := store.db.QueryRow("PRAGMA foreign_keys").Scan(&foreignKeys); err != nil {
-		t.Fatalf("read foreign_keys: %v", err)
-	}
-	if foreignKeys != 1 {
-		t.Fatalf("expected foreign_keys 1, got %d", foreignKeys)
-	}
+	err = store.db.QueryRow("PRAGMA foreign_keys").Scan(&foreignKeys)
+	require.NoError(t, err)
+	assert.Equal(t, 1, foreignKeys)
 
 	var busyTimeout int
-	if err := store.db.QueryRow("PRAGMA busy_timeout").Scan(&busyTimeout); err != nil {
-		t.Fatalf("read busy_timeout: %v", err)
-	}
-	if busyTimeout != 5000 {
-		t.Fatalf("expected busy_timeout 5000, got %d", busyTimeout)
-	}
+	err = store.db.QueryRow("PRAGMA busy_timeout").Scan(&busyTimeout)
+	require.NoError(t, err)
+	assert.Equal(t, 5000, busyTimeout)
 }
 
 func TestOpenRejectsNewerSchemaVersion(t *testing.T) {
 	path := testDBPath(t)
 	store, err := Open(path)
-	if err != nil {
-		t.Fatalf("open store: %v", err)
-	}
-	if _, err := store.db.Exec("INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)", latestMigrationVersion+1, 1); err != nil {
-		t.Fatalf("insert newer schema version: %v", err)
-	}
-	if err := store.Close(); err != nil {
-		t.Fatalf("close store: %v", err)
-	}
+	require.NoError(t, err)
+	
+	_, err = store.db.Exec("INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)", latestMigrationVersion+1, 1)
+	require.NoError(t, err)
+	require.NoError(t, store.Close())
 
 	reopened, err := Open(path)
-	if err == nil {
-		_ = reopened.Close()
-		t.Fatal("expected newer schema version error")
-	}
-	if !strings.Contains(err.Error(), "newer than supported") {
-		t.Fatalf("expected newer schema version error, got %v", err)
-	}
+	assert.Error(t, err)
+	assert.Nil(t, reopened)
+	assert.ErrorContains(t, err, "newer than supported")
 }
 
 func TestValidateMigrationHistory(t *testing.T) {
-	// Simulate a binary that knows migrations 1, 2, 3.
 	known := []migration{
 		{version: 1},
 		{version: 2},
@@ -398,20 +325,12 @@ func TestValidateMigrationHistory(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			got, err := validateMigrationHistory(tt.applied, known, latestSupported)
 			if tt.wantError != "" {
-				if err == nil {
-					t.Fatalf("expected error containing %q, got nil", tt.wantError)
-				}
-				if !strings.Contains(err.Error(), tt.wantError) {
-					t.Fatalf("expected error containing %q, got %v", tt.wantError, err)
-				}
+				assert.Error(t, err)
+				assert.ErrorContains(t, err, tt.wantError)
 				return
 			}
-			if err != nil {
-				t.Fatalf("unexpected error: %v", err)
-			}
-			if got != tt.wantVer {
-				t.Fatalf("expected version %d, got %d", tt.wantVer, got)
-			}
+			assert.NoError(t, err)
+			assert.Equal(t, tt.wantVer, got)
 		})
 	}
 }
@@ -439,82 +358,273 @@ func TestConcurrentInitialization(t *testing.T) {
 	wg.Wait()
 
 	for i, err := range errs {
-		if err != nil {
-			t.Fatalf("open store %d: %v", i, err)
-		}
+		assert.NoError(t, err, "open store %d failed", i)
 	}
 	for i, store := range stores {
-		if store == nil {
-			t.Fatalf("store %d is nil", i)
-		}
-		if err := store.Close(); err != nil {
-			t.Fatalf("close store %d: %v", i, err)
-		}
+		require.NotNil(t, store, "store %d is nil", i)
+		assert.NoError(t, store.Close(), "close store %d failed", i)
 	}
 
 	reopened, err := Open(path)
-	if err != nil {
-		t.Fatalf("reopen store: %v", err)
-	}
+	require.NoError(t, err)
 	t.Cleanup(func() {
-		if err := reopened.Close(); err != nil {
-			t.Fatalf("close reopened store: %v", err)
-		}
+		require.NoError(t, reopened.Close())
 	})
 
-	if count := countRows(t, reopened, "SELECT COUNT(*) FROM schema_migrations WHERE version = 1"); count != 1 {
-		t.Fatalf("expected migration 1 recorded once, got %d", count)
-	}
+	count := countRows(t, reopened, "SELECT COUNT(*) FROM schema_migrations WHERE version = 1")
+	assert.Equal(t, 1, count)
+
 	for _, table := range []string{"schema_migrations", "jobs", "config", "workers"} {
-		if !tableExists(t, reopened, table) {
-			t.Fatalf("expected table %q to exist", table)
-		}
+		assert.True(t, tableExists(t, reopened, table), "expected table %q to exist", table)
 	}
-	if count := countRows(t, reopened, "SELECT COUNT(*) FROM config"); count != 2 {
-		t.Fatalf("expected 2 config rows, got %d", count)
-	}
+	count = countRows(t, reopened, "SELECT COUNT(*) FROM config")
+	assert.Equal(t, 2, count)
 }
 
 func TestTwoStoreInstancesOpenSameDatabaseAndObserveData(t *testing.T) {
 	path := testDBPath(t)
 
 	first, err := Open(path)
-	if err != nil {
-		t.Fatalf("open first store: %v", err)
-	}
+	require.NoError(t, err)
 	t.Cleanup(func() {
-		if err := first.Close(); err != nil {
-			t.Fatalf("close first store: %v", err)
-		}
+		require.NoError(t, first.Close())
 	})
 
 	second, err := Open(path)
-	if err != nil {
-		t.Fatalf("open second store: %v", err)
-	}
+	require.NoError(t, err)
 	t.Cleanup(func() {
-		if err := second.Close(); err != nil {
-			t.Fatalf("close second store: %v", err)
-		}
+		require.NoError(t, second.Close())
 	})
 
-	if _, err := first.db.Exec(
+	_, err = first.db.Exec(
 		"INSERT INTO workers (id, pid, started_at, heartbeat_at) VALUES (?, ?, ?, ?)",
 		"worker-1",
 		1234,
 		1,
 		1,
-	); err != nil {
-		t.Fatalf("insert worker from first store: %v", err)
-	}
+	)
+	require.NoError(t, err)
 
 	var pid int
-	if err := second.db.QueryRow("SELECT pid FROM workers WHERE id = ?", "worker-1").Scan(&pid); err != nil {
-		t.Fatalf("read worker from second store: %v", err)
+	err = second.db.QueryRow("SELECT pid FROM workers WHERE id = ?", "worker-1").Scan(&pid)
+	require.NoError(t, err)
+	assert.Equal(t, 1234, pid)
+}
+
+// --- Enqueue tests ---
+
+func TestEnqueueCreatesPendingJob(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+
+	job, err := s.Enqueue(ctx, "job-1", "echo hello")
+	require.NoError(t, err)
+
+	assert.Equal(t, "job-1", job.ID)
+	assert.Equal(t, "echo hello", job.Command)
+	assert.Equal(t, "pending", job.State)
+	assert.Equal(t, 0, job.Attempts)
+	assert.Equal(t, 3, job.MaxRetries)
+	assert.Equal(t, 2, job.BackoffBase)
+	assert.NotZero(t, job.CreatedAt)
+	assert.Equal(t, job.CreatedAt, job.UpdatedAt)
+
+	persisted, err := s.Job(ctx, "job-1")
+	require.NoError(t, err)
+	assert.Nil(t, persisted.NextRunAt)
+	assert.Nil(t, persisted.WorkerID)
+	assert.Nil(t, persisted.LeaseExpiresAt)
+	assert.Nil(t, persisted.StartedAt)
+	assert.Nil(t, persisted.CompletedAt)
+	assert.Nil(t, persisted.ExitCode)
+	assert.Nil(t, persisted.LastError)
+}
+
+func TestEnqueueSurvivesCloseAndReopen(t *testing.T) {
+	path := testDBPath(t)
+	ctx := context.Background()
+
+	s, err := Open(path)
+	require.NoError(t, err)
+
+	_, err = s.Enqueue(ctx, "job-1", "echo hello")
+	require.NoError(t, err)
+	require.NoError(t, s.Close())
+
+	reopened, err := Open(path)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, reopened.Close()) })
+
+	job, err := reopened.Job(ctx, "job-1")
+	require.NoError(t, err)
+	assert.Equal(t, "echo hello", job.Command)
+	assert.Equal(t, "pending", job.State)
+}
+
+func TestEnqueueDuplicateIDReturnsError(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+
+	_, err := s.Enqueue(ctx, "job-1", "echo first")
+	require.NoError(t, err)
+
+	_, err = s.Enqueue(ctx, "job-1", "echo second")
+	assert.ErrorIs(t, err, ErrJobAlreadyExists)
+}
+
+func TestEnqueueDuplicatePreservesOriginal(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+
+	_, err := s.Enqueue(ctx, "job-1", "echo first")
+	require.NoError(t, err)
+
+	_, _ = s.Enqueue(ctx, "job-1", "echo second")
+
+	job, err := s.Job(ctx, "job-1")
+	require.NoError(t, err)
+	assert.Equal(t, "echo first", job.Command)
+}
+
+func TestEnqueueSnapshotsPersistedConfig(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+
+	_, err := s.db.Exec("UPDATE config SET value = '5' WHERE key = 'max-retries'")
+	require.NoError(t, err)
+	_, err = s.db.Exec("UPDATE config SET value = '3' WHERE key = 'backoff-base'")
+	require.NoError(t, err)
+
+	job, err := s.Enqueue(ctx, "job-1", "echo hello")
+	require.NoError(t, err)
+	assert.Equal(t, 5, job.MaxRetries)
+	assert.Equal(t, 3, job.BackoffBase)
+}
+
+func TestEnqueueExistingJobConfigStable(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+
+	jobA, err := s.Enqueue(ctx, "job-a", "echo a")
+	require.NoError(t, err)
+
+	_, err = s.db.Exec("UPDATE config SET value = '10' WHERE key = 'max-retries'")
+	require.NoError(t, err)
+	_, err = s.db.Exec("UPDATE config SET value = '5' WHERE key = 'backoff-base'")
+	require.NoError(t, err)
+
+	jobB, err := s.Enqueue(ctx, "job-b", "echo b")
+	require.NoError(t, err)
+
+	assert.Equal(t, 3, jobA.MaxRetries)
+	assert.Equal(t, 2, jobA.BackoffBase)
+
+	assert.Equal(t, 10, jobB.MaxRetries)
+	assert.Equal(t, 5, jobB.BackoffBase)
+
+	persistedA, err := s.Job(ctx, "job-a")
+	require.NoError(t, err)
+	assert.Equal(t, 3, persistedA.MaxRetries)
+	assert.Equal(t, 2, persistedA.BackoffBase)
+}
+
+func TestEnqueueMissingConfigKey(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+
+	_, err := s.db.Exec("DELETE FROM config WHERE key = ?", "max-retries")
+	require.NoError(t, err)
+
+	_, err = s.Enqueue(ctx, "job-1", "echo hello")
+	assert.Error(t, err)
+	assert.ErrorContains(t, err, "max-retries")
+}
+
+func TestEnqueueInvalidConfigValue(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+
+	_, err := s.db.Exec("UPDATE config SET value = 'not-a-number' WHERE key = 'max-retries'")
+	require.NoError(t, err)
+
+	_, err = s.Enqueue(ctx, "job-1", "echo hello")
+	assert.Error(t, err)
+	assert.ErrorContains(t, err, "max-retries")
+}
+
+func TestEnqueueInvalidConfigRange(t *testing.T) {
+	tests := []struct {
+		name  string
+		key   string
+		value string
+	}{
+		{"max-retries negative", "max-retries", "-1"},
+		{"backoff-base zero", "backoff-base", "0"},
 	}
-	if pid != 1234 {
-		t.Fatalf("expected pid 1234, got %d", pid)
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := openTestStore(t)
+			ctx := context.Background()
+
+			_, err := s.db.Exec("UPDATE config SET value = ? WHERE key = ?", tt.value, tt.key)
+			require.NoError(t, err)
+
+			_, err = s.Enqueue(ctx, "job-1", "echo hello")
+			assert.Error(t, err)
+			assert.ErrorContains(t, err, tt.key)
+		})
 	}
+}
+
+func TestEnqueueRejectsEmptyID(t *testing.T) {
+	s := openTestStore(t)
+	_, err := s.Enqueue(context.Background(), "", "echo hello")
+	assert.Error(t, err)
+	assert.ErrorContains(t, err, "id")
+}
+
+func TestEnqueueRejectsWhitespaceID(t *testing.T) {
+	s := openTestStore(t)
+	_, err := s.Enqueue(context.Background(), "   ", "echo hello")
+	assert.Error(t, err)
+	assert.ErrorContains(t, err, "id")
+}
+
+func TestEnqueueRejectsEmptyCommand(t *testing.T) {
+	s := openTestStore(t)
+	_, err := s.Enqueue(context.Background(), "job-1", "")
+	assert.Error(t, err)
+	assert.ErrorContains(t, err, "command")
+}
+
+func TestEnqueueRejectsWhitespaceCommand(t *testing.T) {
+	s := openTestStore(t)
+	_, err := s.Enqueue(context.Background(), "job-1", "   ")
+	assert.Error(t, err)
+	assert.ErrorContains(t, err, "command")
+}
+
+func TestEnqueueTrimsID(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+
+	job, err := s.Enqueue(ctx, "  job-1  ", "echo hello")
+	require.NoError(t, err)
+	assert.Equal(t, "job-1", job.ID)
+
+	persisted, err := s.Job(ctx, "job-1")
+	require.NoError(t, err)
+	assert.Equal(t, "job-1", persisted.ID)
+}
+
+func TestEnqueuePreservesCommandWhitespace(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+
+	job, err := s.Enqueue(ctx, "job-1", "  echo hello  ")
+	require.NoError(t, err)
+	assert.Equal(t, "  echo hello  ", job.Command)
 }
 
 // --- Test helpers ---
@@ -528,13 +638,9 @@ func openTestStore(t *testing.T) *Store {
 	t.Helper()
 
 	store, err := Open(testDBPath(t))
-	if err != nil {
-		t.Fatalf("open store: %v", err)
-	}
+	require.NoError(t, err)
 	t.Cleanup(func() {
-		if err := store.Close(); err != nil {
-			t.Fatalf("close store: %v", err)
-		}
+		require.NoError(t, store.Close())
 	})
 
 	return store
@@ -551,9 +657,7 @@ func tableExists(t *testing.T, store *Store, table string) bool {
 	if errors.Is(err, sql.ErrNoRows) {
 		return false
 	}
-	if err != nil {
-		t.Fatalf("check table %q: %v", table, err)
-	}
+	require.NoError(t, err)
 
 	return true
 }
@@ -562,16 +666,15 @@ func countRows(t *testing.T, store *Store, query string) int {
 	t.Helper()
 
 	var count int
-	if err := store.db.QueryRow(query).Scan(&count); err != nil {
-		t.Fatalf("count rows: %v", err)
-	}
+	err := store.db.QueryRow(query).Scan(&count)
+	require.NoError(t, err)
 	return count
 }
 
 func insertJob(t *testing.T, store *Store, id, state string, attempts, maxRetries, backoffBase int) {
 	t.Helper()
 
-	if _, err := store.db.Exec(
+	_, err := store.db.Exec(
 		`INSERT INTO jobs (
 			id, command, state, attempts, max_retries, backoff_base, created_at, updated_at
 		) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -583,7 +686,6 @@ func insertJob(t *testing.T, store *Store, id, state string, attempts, maxRetrie
 		backoffBase,
 		1,
 		1,
-	); err != nil {
-		t.Fatalf("insert job: %v", err)
-	}
+	)
+	require.NoError(t, err)
 }

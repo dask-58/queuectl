@@ -9,6 +9,7 @@ import (
 )
 
 // migrationFS contains all .sql migration files from the migrations directory.
+//
 //go:embed migrations/*.sql
 var migrationFS embed.FS
 
