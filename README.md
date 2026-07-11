@@ -31,6 +31,14 @@ Set `QUEUECTL_DB_PATH` to override the database location.
 
 The underlying storage layer provides strict concurrency safety with atomic job claiming (`ClaimNextJob`), ensuring exactly-once processing capabilities for future workers.
 
+## Lifecycle
+
+Jobs transition through four storage states:
+- `pending`: Awaiting execution (including exponential backoff retries).
+- `processing`: Currently claimed by an execution layer.
+- `completed`: Successfully finalized with `exit_code = 0`.
+- `dead`: Failed beyond `max-retries`.
+
 ## Storage
 
 QueueCTL uses an embedded SQLite database (via [modernc.org/sqlite](https://pkg.go.dev/modernc.org/sqlite)) for persistent storage of jobs, configuration, and worker state. The database is initialized automatically on first use with versioned schema migrations.

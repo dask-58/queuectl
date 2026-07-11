@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -1045,6 +1046,200 @@ func TestConcurrentClaimC(t *testing.T) {
 	assert.Equal(t, 20, successCount)
 	assert.Equal(t, 0, errNoPendingCount)
 	assert.Len(t, claimedIDs, 20)
+}
+
+// --- Backoff tests ---
+
+func TestRetryDelay(t *testing.T) {
+	tests := []struct {
+		base    int
+		attempt int
+		want    time.Duration
+	}{
+		{2, 1, time.Second},
+		{2, 2, 2 * time.Second},
+		{2, 3, 4 * time.Second},
+		{2, 4, 8 * time.Second},
+		{3, 1, time.Second},
+		{3, 2, 3 * time.Second},
+		{3, 3, 9 * time.Second},
+		{2, 0, 0},
+		{2, -1, 0},
+	}
+
+	for _, tt := range tests {
+		name := fmt.Sprintf("base%d_attempt%d", tt.base, tt.attempt)
+		t.Run(name, func(t *testing.T) {
+			got := retryDelay(tt.base, tt.attempt)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
+// --- FinishJob correctness tests ---
+
+func setupFinishJobTest(t *testing.T) (*Store, *Job) {
+	s := openTestStore(t)
+	ctx := context.Background()
+
+	_, err := s.Enqueue(ctx, "job-1", "echo hello")
+	require.NoError(t, err)
+
+	job, err := s.ClaimNextJob(ctx, "worker-1")
+	require.NoError(t, err)
+
+	return s, job
+}
+
+func TestFinishJobSuccess(t *testing.T) {
+	s, claimedJob := setupFinishJobTest(t)
+	ctx := context.Background()
+	now := time.Now().UTC().UnixMilli()
+
+	job, err := s.FinishJob(ctx, "job-1", 0, "")
+	require.NoError(t, err)
+
+	assert.Equal(t, JobStateCompleted, job.State)        // 1
+	assert.Equal(t, claimedJob.Attempts+1, job.Attempts) // 2
+	assert.NotNil(t, job.CompletedAt)                    // 3
+	assert.GreaterOrEqual(t, *job.CompletedAt, now)
+
+	assert.Nil(t, job.WorkerID)       // 4
+	assert.Nil(t, job.LeaseExpiresAt) // 4
+
+	assert.NotNil(t, job.ExitCode)    // 5
+	assert.Equal(t, 0, *job.ExitCode) // 5
+
+	assert.Nil(t, job.LastError) // 6
+
+	assert.GreaterOrEqual(t, job.UpdatedAt, claimedJob.UpdatedAt) // 24
+	assert.Equal(t, claimedJob.CreatedAt, job.CreatedAt)          // 22
+	assert.Equal(t, claimedJob.StartedAt, job.StartedAt)          // 23
+}
+
+func TestFinishJobFailureBelowRetryLimit(t *testing.T) {
+	s, claimedJob := setupFinishJobTest(t)
+	ctx := context.Background()
+
+	job, err := s.FinishJob(ctx, "job-1", 1, "some error")
+	require.NoError(t, err)
+
+	assert.Equal(t, JobStatePending, job.State)          // 7
+	assert.Equal(t, claimedJob.Attempts+1, job.Attempts) // 8
+	assert.NotNil(t, job.NextRunAt)                      // 9
+	assert.NotNil(t, job.LastError)                      // 10
+	assert.Equal(t, "some error", *job.LastError)        // 10
+
+	assert.Nil(t, job.WorkerID)       // 11
+	assert.Nil(t, job.LeaseExpiresAt) // 12
+	assert.Nil(t, job.CompletedAt)    // 13
+
+	assert.NotNil(t, job.ExitCode)
+	assert.Equal(t, 1, *job.ExitCode)
+}
+
+func TestFinishJobFailureExceedingRetryLimit(t *testing.T) {
+	s, claimedJob := setupFinishJobTest(t)
+	ctx := context.Background()
+
+	// Claim and fail max_retries times
+	for i := 0; i < claimedJob.MaxRetries; i++ {
+		_, err := s.FinishJob(ctx, "job-1", 1, "err")
+		require.NoError(t, err)
+
+		// Reset next_run_at to allow claiming again immediately
+		past := time.Now().UTC().UnixMilli() - 1000
+		_, err = s.db.Exec("UPDATE jobs SET next_run_at = ? WHERE id = 'job-1'", past)
+		require.NoError(t, err)
+
+		_, err = s.ClaimNextJob(ctx, "worker-1")
+		require.NoError(t, err)
+	}
+
+	job, err := s.FinishJob(ctx, "job-1", 1, "final error")
+	require.NoError(t, err)
+
+	assert.Equal(t, JobStateDead, job.State) // 14
+	assert.NotNil(t, job.CompletedAt)        // 15
+	assert.Nil(t, job.NextRunAt)             // 16
+}
+
+func TestFinishJobInvalidStateRejected(t *testing.T) { // 17
+	s := openTestStore(t)
+	ctx := context.Background()
+
+	_, err := s.Enqueue(ctx, "job-1", "cmd")
+	require.NoError(t, err)
+
+	_, err = s.FinishJob(ctx, "job-1", 0, "")
+	assert.ErrorContains(t, err, "expected \"processing\"")
+}
+
+func TestFinishJobMissingJob(t *testing.T) { // 18
+	s := openTestStore(t)
+	ctx := context.Background()
+
+	_, err := s.FinishJob(ctx, "non-existent", 0, "")
+	assert.ErrorIs(t, err, ErrJobNotFound)
+}
+
+func TestFinishJobIDTrimming(t *testing.T) { // 19
+	s, _ := setupFinishJobTest(t)
+	ctx := context.Background()
+
+	job, err := s.FinishJob(ctx, "  job-1  ", 0, "")
+	require.NoError(t, err)
+	assert.Equal(t, "job-1", job.ID)
+
+	_, err = s.FinishJob(ctx, "   \t\n", 0, "")
+	assert.ErrorContains(t, err, "job ID is required")
+}
+
+func TestFinishJobStderrPreservedExactly(t *testing.T) { // 20
+	s, _ := setupFinishJobTest(t)
+	ctx := context.Background()
+
+	exactStderr := "  leading spaces\n\ttabs\nnewlines  \n"
+	job, err := s.FinishJob(ctx, "job-1", 1, exactStderr)
+	require.NoError(t, err)
+	assert.NotNil(t, job.LastError)
+	assert.Equal(t, exactStderr, *job.LastError)
+}
+
+func TestFinishJobExitCodeNegativeAccepted(t *testing.T) { // 21
+	s, _ := setupFinishJobTest(t)
+	ctx := context.Background()
+
+	job, err := s.FinishJob(ctx, "job-1", -1, "error")
+	require.NoError(t, err)
+	assert.NotNil(t, job.ExitCode)
+	assert.Equal(t, -1, *job.ExitCode)
+}
+
+// --- Claim integration test ---
+
+func TestClaimNextJobIntegrationBackoff(t *testing.T) { // 20
+	s := openTestStore(t)
+	ctx := context.Background()
+
+	_, err := s.Enqueue(ctx, "job-1", "cmd")
+	require.NoError(t, err)
+
+	_, err = s.ClaimNextJob(ctx, "worker-1")
+	require.NoError(t, err)
+
+	_, err = s.FinishJob(ctx, "job-1", 1, "err")
+	require.NoError(t, err)
+
+	_, err = s.ClaimNextJob(ctx, "worker-1")
+	assert.ErrorIs(t, err, ErrNoPendingJobs) // backoff active
+
+	// Time travel
+	_, err = s.db.Exec("UPDATE jobs SET next_run_at = ? WHERE id = 'job-1'", time.Now().UTC().UnixMilli()-1000)
+	require.NoError(t, err)
+
+	_, err = s.ClaimNextJob(ctx, "worker-1")
+	require.NoError(t, err) // success
 }
 
 // --- Test helpers ---

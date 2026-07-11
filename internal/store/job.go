@@ -207,8 +207,10 @@ func (s *Store) ClaimNextJob(ctx context.Context, workerID string) (*Job, error)
 		}
 	}()
 
+	now := time.Now().UTC().UnixMilli()
+
 	var id string
-	err = conn.QueryRowContext(ctx, "SELECT id FROM jobs WHERE state = ? ORDER BY created_at ASC, id ASC LIMIT 1", JobStatePending).Scan(&id)
+	err = conn.QueryRowContext(ctx, "SELECT id FROM jobs WHERE state = ? AND (next_run_at IS NULL OR next_run_at <= ?) ORDER BY created_at ASC, id ASC LIMIT 1", JobStatePending, now).Scan(&id)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNoPendingJobs
 	}
@@ -216,7 +218,6 @@ func (s *Store) ClaimNextJob(ctx context.Context, workerID string) (*Job, error)
 		return nil, fmt.Errorf("find next pending job: %w", err)
 	}
 
-	now := time.Now().UTC().UnixMilli()
 	expiresAt := now + defaultLeaseDuration.Milliseconds()
 
 	res, err := conn.ExecContext(ctx,
@@ -246,6 +247,110 @@ func (s *Store) ClaimNextJob(ctx context.Context, workerID string) (*Job, error)
 	committed = true
 
 	return j, nil
+}
+
+func (s *Store) FinishJob(ctx context.Context, jobID string, exitCode int, stderr string) (*Job, error) {
+	jobID = strings.TrimSpace(jobID)
+	if jobID == "" {
+		return nil, fmt.Errorf("job ID is required")
+	}
+
+	conn, err := s.db.Conn(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("acquire connection: %w", err)
+	}
+	defer conn.Close()
+
+	if _, err := conn.ExecContext(ctx, "BEGIN IMMEDIATE"); err != nil {
+		return nil, fmt.Errorf("begin immediate transaction: %w", err)
+	}
+
+	var committed bool
+	defer func() {
+		if !committed {
+			_ = rollbackTransaction(conn)
+		}
+	}()
+
+	currentJob, err := queryJobByID(ctx, conn, jobID)
+	if err != nil {
+		if errors.Is(err, ErrJobNotFound) {
+			return nil, ErrJobNotFound
+		}
+		return nil, fmt.Errorf("query current job: %w", err)
+	}
+
+	if currentJob.State != JobStateProcessing {
+		return nil, fmt.Errorf("job %q is in state %q, expected %q", jobID, currentJob.State, JobStateProcessing)
+	}
+
+	now := time.Now().UTC().UnixMilli()
+	newAttempts := currentJob.Attempts + 1
+	var newState string
+	var nextRunAt *int64
+	var completedAt *int64
+
+	if exitCode == 0 {
+		newState = JobStateCompleted
+		completedAt = &now
+	} else {
+		if newAttempts <= currentJob.MaxRetries {
+			newState = JobStatePending
+			delayMs := retryDelay(currentJob.BackoffBase, newAttempts)
+			nextRun := now + delayMs.Milliseconds()
+			nextRunAt = &nextRun
+		} else {
+			newState = JobStateDead
+			completedAt = &now
+		}
+	}
+
+	var lastError *string
+	if exitCode != 0 {
+		lastError = &stderr
+	}
+
+	res, err := conn.ExecContext(ctx,
+		`UPDATE jobs SET state = ?, attempts = ?, updated_at = ?, completed_at = ?, next_run_at = ?, exit_code = ?, last_error = ?, worker_id = NULL, lease_expires_at = NULL WHERE id = ?`,
+		newState, newAttempts, now, completedAt, nextRunAt, exitCode, lastError, jobID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("update finished job: %w", err)
+	}
+
+	rowsAffected, err := res.RowsAffected()
+	if err != nil {
+		return nil, fmt.Errorf("check rows affected: %w", err)
+	}
+	if rowsAffected != 1 {
+		return nil, fmt.Errorf("internal error: expected 1 row affected, got %d", rowsAffected)
+	}
+
+	finalJob, err := queryJobByID(ctx, conn, jobID)
+	if err != nil {
+		if errors.Is(err, ErrJobNotFound) {
+			return nil, ErrJobNotFound
+		}
+		return nil, fmt.Errorf("query updated job: %w", err)
+	}
+
+	if _, err := conn.ExecContext(ctx, "COMMIT"); err != nil {
+		return nil, fmt.Errorf("commit transaction: %w", err)
+	}
+	committed = true
+
+	return finalJob, nil
+}
+
+func retryDelay(base, attempt int) time.Duration {
+	if attempt < 1 {
+		return 0
+	}
+	delay := 1
+	for i := 0; i < attempt-1; i++ {
+		delay *= base
+	}
+	return time.Duration(delay) * time.Second
 }
 
 func readIntConfig(ctx context.Context, tx *sql.Tx, key string) (int, error) {
