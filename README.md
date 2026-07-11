@@ -39,6 +39,12 @@ Jobs transition through four storage states:
 - `completed`: Successfully finalized with `exit_code = 0`.
 - `dead`: Failed beyond `max-retries`.
 
+## Architecture
+
+- A durable SQLite storage foundation supporting concurrent queue claiming.
+- Safe retries with integer-based exponential backoff.
+- Execution engine supporting shell pipelines via `sh -c`. (Note: Workers are still not implemented).
+
 ## Storage
 
 QueueCTL uses an embedded SQLite database (via [modernc.org/sqlite](https://pkg.go.dev/modernc.org/sqlite)) for persistent storage of jobs, configuration, and worker state. The database is initialized automatically on first use with versioned schema migrations.

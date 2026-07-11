@@ -1,0 +1,58 @@
+package executor
+
+import (
+	"bytes"
+	"context"
+	"errors"
+	"os/exec"
+
+	"github.com/dask-58/queuectl/internal/store"
+)
+
+var shellPath = "sh"
+
+// Execute runs the provided job's command strictly via `sh -c`.
+// It captures stderr, ignores stdout, and distinguishes between normal process
+// exits (returned as exitCode) and infrastructure failures (returned as err).
+func Execute(ctx context.Context, job store.Job) (exitCode int, stderr string, err error) {
+	cmd := exec.CommandContext(ctx, shellPath, "-c", job.Command)
+
+	var errBuf bytes.Buffer
+	cmd.Stderr = &errBuf
+
+	runErr := cmd.Run()
+	capturedStderr := errBuf.String()
+
+	if runErr == nil {
+		return 0, capturedStderr, nil
+	}
+
+	if code, ok := exitCodeFromErr(runErr); ok {
+		return code, capturedStderr, nil
+	}
+
+	if err := ctx.Err(); err != nil {
+		return 0, "", err
+	}
+
+	if runErr != nil {
+		if code, ok := exitCodeFromErr(runErr); ok {
+			return code, capturedStderr, nil
+		}
+		// Non-process errors like context cancellation, executable not found, fork failure
+		return 0, "", runErr
+	}
+
+	return 0, capturedStderr, nil
+}
+
+func exitCodeFromErr(err error) (int, bool) {
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) {
+		if exitErr.ExitCode() == -1 {
+			return 0, false
+		}
+		return exitErr.ExitCode(), true
+	}
+	return 0, false
+}
