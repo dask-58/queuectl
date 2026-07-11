@@ -34,29 +34,8 @@ func newRootCommand(stdout, stderr io.Writer, getenv func(string) string) *cobra
 		newStatusCommand(getenv),
 		newListCommand(getenv),
 		newDLQCommand(getenv),
-		newConfigCommand(),
+		newConfigCommand(getenv),
 	)
 
 	return cmd
-}
-
-func newConfigCommand() *cobra.Command {
-	cmd := &cobra.Command{
-		Use:   "config",
-		Short: "Manage configuration",
-	}
-
-	cmd.AddCommand(newConfigSetCommand())
-	return cmd
-}
-
-func newConfigSetCommand() *cobra.Command {
-	return &cobra.Command{
-		Use:   "set <key> <value>",
-		Short: "Set a configuration value",
-		Args:  cobra.ExactArgs(2),
-		RunE: func(cmd *cobra.Command, args []string) error {
-			return ErrNotImplemented
-		},
-	}
 }
