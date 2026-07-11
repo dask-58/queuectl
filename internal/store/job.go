@@ -21,7 +21,10 @@ const (
 var (
 	ErrJobAlreadyExists = errors.New("job already exists")
 	ErrJobNotFound      = errors.New("job not found")
+	ErrNoPendingJobs    = errors.New("no pending jobs")
 )
+
+const defaultLeaseDuration = 30 * time.Second
 
 func IsValidJobState(state string) bool {
 	switch state {
@@ -127,8 +130,10 @@ func scanJob(s scanner) (*Job, error) {
 	return &j, nil
 }
 
-func (s *Store) Job(ctx context.Context, id string) (*Job, error) {
-	row := s.db.QueryRowContext(ctx,
+func queryJobByID(ctx context.Context, q interface {
+	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
+}, id string) (*Job, error) {
+	row := q.QueryRowContext(ctx,
 		`SELECT id, command, state, attempts, max_retries, backoff_base,
 				created_at, updated_at, next_run_at, worker_id,
 				lease_expires_at, started_at, completed_at, exit_code, last_error
@@ -143,6 +148,10 @@ func (s *Store) Job(ctx context.Context, id string) (*Job, error) {
 	}
 
 	return j, nil
+}
+
+func (s *Store) Job(ctx context.Context, id string) (*Job, error) {
+	return queryJobByID(ctx, s.db, id)
 }
 
 func (s *Store) ListJobsByState(ctx context.Context, state string) ([]Job, error) {
@@ -173,6 +182,70 @@ func (s *Store) ListJobsByState(ctx context.Context, state string) ([]Job, error
 	}
 
 	return jobs, nil
+}
+
+func (s *Store) ClaimNextJob(ctx context.Context, workerID string) (*Job, error) {
+	workerID = strings.TrimSpace(workerID)
+	if workerID == "" {
+		return nil, fmt.Errorf("worker ID is required")
+	}
+
+	conn, err := s.db.Conn(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("acquire connection: %w", err)
+	}
+	defer conn.Close()
+
+	if _, err := conn.ExecContext(ctx, "BEGIN IMMEDIATE"); err != nil {
+		return nil, fmt.Errorf("begin immediate transaction: %w", err)
+	}
+
+	var committed bool
+	defer func() {
+		if !committed {
+			_ = rollbackTransaction(conn)
+		}
+	}()
+
+	var id string
+	err = conn.QueryRowContext(ctx, "SELECT id FROM jobs WHERE state = ? ORDER BY created_at ASC, id ASC LIMIT 1", JobStatePending).Scan(&id)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNoPendingJobs
+	}
+	if err != nil {
+		return nil, fmt.Errorf("find next pending job: %w", err)
+	}
+
+	now := time.Now().UTC().UnixMilli()
+	expiresAt := now + defaultLeaseDuration.Milliseconds()
+
+	res, err := conn.ExecContext(ctx,
+		`UPDATE jobs SET state = ?, worker_id = ?, started_at = ?, lease_expires_at = ?, updated_at = ? WHERE id = ?`,
+		JobStateProcessing, workerID, now, expiresAt, now, id,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("update claimed job: %w", err)
+	}
+
+	rowsAffected, err := res.RowsAffected()
+	if err != nil {
+		return nil, fmt.Errorf("check rows affected: %w", err)
+	}
+	if rowsAffected != 1 {
+		return nil, fmt.Errorf("internal error: expected 1 row affected, got %d", rowsAffected)
+	}
+
+	j, err := queryJobByID(ctx, conn, id)
+	if err != nil {
+		return nil, fmt.Errorf("query updated job: %w", err)
+	}
+
+	if _, err := conn.ExecContext(ctx, "COMMIT"); err != nil {
+		return nil, fmt.Errorf("commit transaction: %w", err)
+	}
+	committed = true
+
+	return j, nil
 }
 
 func readIntConfig(ctx context.Context, tx *sql.Tx, key string) (int, error) {

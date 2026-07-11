@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sync"
@@ -729,6 +730,321 @@ func TestListJobsByStateScansNullableFields(t *testing.T) {
 	assert.Equal(t, &t4, job.CompletedAt)
 	assert.Equal(t, &exitCode, job.ExitCode)
 	assert.Equal(t, &lastErr, job.LastError)
+}
+
+// --- ClaimNextJob correctness tests ---
+
+func TestClaimNextJobReturnsErrNoPendingJobs(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+
+	_, err := s.ClaimNextJob(ctx, "worker-1")
+	assert.ErrorIs(t, err, ErrNoPendingJobs)
+}
+
+func TestClaimNextJobSuccess(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+
+	_, err := s.Enqueue(ctx, "job-1", "echo hello")
+	require.NoError(t, err)
+
+	job, err := s.ClaimNextJob(ctx, "worker-1")
+	require.NoError(t, err)
+
+	assert.Equal(t, "job-1", job.ID)
+	assert.Equal(t, JobStateProcessing, job.State)
+	assert.NotNil(t, job.WorkerID)
+	assert.Equal(t, "worker-1", *job.WorkerID)
+
+	assert.NotNil(t, job.StartedAt)
+
+	assert.NotNil(t, job.LeaseExpiresAt)
+	expectedLease := *job.StartedAt + defaultLeaseDuration.Milliseconds()
+	assert.Equal(t, expectedLease, *job.LeaseExpiresAt)
+
+	// UpdatedAt should be changed
+	assert.GreaterOrEqual(t, job.UpdatedAt, job.CreatedAt)
+
+	// Attempts remain zero
+	assert.Equal(t, 0, job.Attempts)
+
+	// CreatedAt remains unchanged
+	assert.NotZero(t, job.CreatedAt)
+}
+
+func TestClaimNextJobIgnoresOtherStates(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+
+	insertJob(t, s, "job-proc", JobStateProcessing, 0, 3, 2)
+	insertJob(t, s, "job-comp", JobStateCompleted, 0, 3, 2)
+	insertJob(t, s, "job-fail", JobStateFailed, 0, 3, 2)
+	insertJob(t, s, "job-dead", JobStateDead, 0, 3, 2)
+
+	_, err := s.ClaimNextJob(ctx, "worker-1")
+	assert.ErrorIs(t, err, ErrNoPendingJobs)
+}
+
+func TestClaimNextJobFIFO(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+
+	_, err := s.db.Exec(`INSERT INTO jobs (id, command, state, attempts, max_retries, backoff_base, created_at, updated_at) VALUES 
+		('job-2', 'cmd', 'pending', 0, 3, 2, 200, 200),
+		('job-1', 'cmd', 'pending', 0, 3, 2, 100, 100)`)
+	require.NoError(t, err)
+
+	job, err := s.ClaimNextJob(ctx, "worker-1")
+	require.NoError(t, err)
+	assert.Equal(t, "job-1", job.ID)
+}
+
+func TestClaimNextJobTieBreakID(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+
+	_, err := s.db.Exec(`INSERT INTO jobs (id, command, state, attempts, max_retries, backoff_base, created_at, updated_at) VALUES 
+		('job-b', 'cmd', 'pending', 0, 3, 2, 100, 100),
+		('job-a', 'cmd', 'pending', 0, 3, 2, 100, 100)`)
+	require.NoError(t, err)
+
+	job, err := s.ClaimNextJob(ctx, "worker-1")
+	require.NoError(t, err)
+	assert.Equal(t, "job-a", job.ID)
+}
+
+func TestClaimNextJobPersistsAfterCloseAndReopen(t *testing.T) {
+	path := testDBPath(t)
+	ctx := context.Background()
+
+	s, err := Open(path)
+	require.NoError(t, err)
+	_, err = s.Enqueue(ctx, "job-1", "cmd")
+	require.NoError(t, err)
+
+	_, err = s.ClaimNextJob(ctx, "worker-1")
+	require.NoError(t, err)
+	require.NoError(t, s.Close())
+
+	reopened, err := Open(path)
+	require.NoError(t, err)
+	defer reopened.Close()
+
+	persisted, err := reopened.Job(ctx, "job-1")
+	require.NoError(t, err)
+	assert.Equal(t, JobStateProcessing, persisted.State)
+	assert.NotNil(t, persisted.WorkerID)
+	assert.Equal(t, "worker-1", *persisted.WorkerID)
+}
+
+func TestClaimNextJobTrimsWorkerID(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	_, err := s.Enqueue(ctx, "job-1", "cmd")
+	require.NoError(t, err)
+
+	job, err := s.ClaimNextJob(ctx, "  worker-1  ")
+	require.NoError(t, err)
+	assert.Equal(t, "worker-1", *job.WorkerID)
+
+	_, err = s.Enqueue(ctx, "job-2", "cmd")
+	require.NoError(t, err)
+	_, err = s.ClaimNextJob(ctx, "   \t\n")
+	assert.ErrorContains(t, err, "worker ID is required")
+}
+
+// --- ClaimNextJob Concurrency tests ---
+
+func TestConcurrentClaimA(t *testing.T) {
+	path := testDBPath(t)
+	ctx := context.Background()
+
+	s, err := Open(path)
+	require.NoError(t, err)
+	_, err = s.Enqueue(ctx, "job-1", "cmd")
+	require.NoError(t, err)
+	require.NoError(t, s.Close())
+
+	const goroutines = 20
+	var wg sync.WaitGroup
+	start := make(chan struct{})
+
+	var mu sync.Mutex
+	var successCount int
+	var errNoPendingCount int
+	var unexpectedErrs []error
+
+	for i := 0; i < goroutines; i++ {
+		wg.Add(1)
+		go func(id int) {
+			defer wg.Done()
+
+			store, err := Open(path)
+			if err != nil {
+				mu.Lock()
+				unexpectedErrs = append(unexpectedErrs, fmt.Errorf("open: %w", err))
+				mu.Unlock()
+				return
+			}
+			defer store.Close()
+
+			<-start
+			_, err = store.ClaimNextJob(context.Background(), "worker")
+
+			mu.Lock()
+			defer mu.Unlock()
+			if err == nil {
+				successCount++
+			} else if errors.Is(err, ErrNoPendingJobs) {
+				errNoPendingCount++
+			} else {
+				unexpectedErrs = append(unexpectedErrs, fmt.Errorf("claim: %w", err))
+			}
+		}(i)
+	}
+
+	close(start)
+	wg.Wait()
+
+	for _, err := range unexpectedErrs {
+		require.NoError(t, err)
+	}
+
+	assert.Equal(t, 1, successCount)
+	assert.Equal(t, 19, errNoPendingCount)
+}
+
+func TestConcurrentClaimB(t *testing.T) {
+	path := testDBPath(t)
+	ctx := context.Background()
+
+	s, err := Open(path)
+	require.NoError(t, err)
+	for i := 0; i < 5; i++ {
+		jobID := fmt.Sprintf("job-%d", i)
+		_, err = s.Enqueue(ctx, jobID, "cmd")
+		require.NoError(t, err)
+	}
+	require.NoError(t, s.Close())
+
+	const goroutines = 5
+	var wg sync.WaitGroup
+	start := make(chan struct{})
+
+	var mu sync.Mutex
+	var successCount int
+	var errNoPendingCount int
+	var unexpectedErrs []error
+	claimedIDs := make(map[string]bool)
+
+	for i := 0; i < goroutines; i++ {
+		wg.Add(1)
+		go func(id int) {
+			defer wg.Done()
+
+			store, err := Open(path)
+			if err != nil {
+				mu.Lock()
+				unexpectedErrs = append(unexpectedErrs, fmt.Errorf("open: %w", err))
+				mu.Unlock()
+				return
+			}
+			defer store.Close()
+
+			<-start
+			job, err := store.ClaimNextJob(context.Background(), "worker")
+
+			mu.Lock()
+			defer mu.Unlock()
+			if err == nil {
+				successCount++
+				assert.False(t, claimedIDs[job.ID], "duplicate claim detected")
+				claimedIDs[job.ID] = true
+			} else if errors.Is(err, ErrNoPendingJobs) {
+				errNoPendingCount++
+			} else {
+				unexpectedErrs = append(unexpectedErrs, fmt.Errorf("claim: %w", err))
+			}
+		}(i)
+	}
+
+	close(start)
+	wg.Wait()
+
+	for _, err := range unexpectedErrs {
+		require.NoError(t, err)
+	}
+
+	assert.Equal(t, 5, successCount)
+	assert.Equal(t, 0, errNoPendingCount)
+	assert.Len(t, claimedIDs, 5)
+}
+
+func TestConcurrentClaimC(t *testing.T) {
+	path := testDBPath(t)
+	ctx := context.Background()
+
+	s, err := Open(path)
+	require.NoError(t, err)
+	for i := 0; i < 20; i++ {
+		jobID := fmt.Sprintf("job-%d", i)
+		_, err = s.db.ExecContext(ctx, `INSERT INTO jobs (id, command, state, attempts, max_retries, backoff_base, created_at, updated_at) VALUES (?, 'cmd', 'pending', 0, 3, 2, ?, ?)`, jobID, i, i)
+		require.NoError(t, err)
+	}
+	require.NoError(t, s.Close())
+
+	const goroutines = 20
+	var wg sync.WaitGroup
+	start := make(chan struct{})
+
+	var mu sync.Mutex
+	var successCount int
+	var errNoPendingCount int
+	var unexpectedErrs []error
+	claimedIDs := make(map[string]bool)
+
+	for i := 0; i < goroutines; i++ {
+		wg.Add(1)
+		go func(id int) {
+			defer wg.Done()
+
+			store, err := Open(path)
+			if err != nil {
+				mu.Lock()
+				unexpectedErrs = append(unexpectedErrs, fmt.Errorf("open: %w", err))
+				mu.Unlock()
+				return
+			}
+			defer store.Close()
+
+			<-start
+			job, err := store.ClaimNextJob(context.Background(), "worker")
+
+			mu.Lock()
+			defer mu.Unlock()
+			if err == nil {
+				successCount++
+				assert.False(t, claimedIDs[job.ID], "duplicate claim detected")
+				claimedIDs[job.ID] = true
+			} else if errors.Is(err, ErrNoPendingJobs) {
+				errNoPendingCount++
+			} else {
+				unexpectedErrs = append(unexpectedErrs, fmt.Errorf("claim: %w", err))
+			}
+		}(i)
+	}
+
+	close(start)
+	wg.Wait()
+
+	for _, err := range unexpectedErrs {
+		require.NoError(t, err)
+	}
+
+	assert.Equal(t, 20, successCount)
+	assert.Equal(t, 0, errNoPendingCount)
+	assert.Len(t, claimedIDs, 20)
 }
 
 // --- Test helpers ---

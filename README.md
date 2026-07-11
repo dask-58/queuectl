@@ -29,6 +29,8 @@ queuectl list --state pending --json
 Jobs persist in the SQLite database at `./queuectl.db` by default.
 Set `QUEUECTL_DB_PATH` to override the database location.
 
+The underlying storage layer provides strict concurrency safety with atomic job claiming (`ClaimNextJob`), ensuring exactly-once processing capabilities for future workers.
+
 ## Storage
 
 QueueCTL uses an embedded SQLite database (via [modernc.org/sqlite](https://pkg.go.dev/modernc.org/sqlite)) for persistent storage of jobs, configuration, and worker state. The database is initialized automatically on first use with versioned schema migrations.

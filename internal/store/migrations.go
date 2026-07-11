@@ -52,13 +52,13 @@ func (s *Store) applyMigrations(ctx context.Context) error {
 	}
 
 	if err := s.applyMigrationsLocked(ctx, conn); err != nil {
-		if rollbackErr := rollbackMigration(conn); rollbackErr != nil {
+		if rollbackErr := rollbackTransaction(conn); rollbackErr != nil {
 			return fmt.Errorf("%w; rollback migration transaction: %v", err, rollbackErr)
 		}
 		return err
 	}
 	if _, err := conn.ExecContext(ctx, "COMMIT"); err != nil {
-		if rollbackErr := rollbackMigration(conn); rollbackErr != nil {
+		if rollbackErr := rollbackTransaction(conn); rollbackErr != nil {
 			return fmt.Errorf("commit migration transaction: %w; rollback migration transaction: %v", err, rollbackErr)
 		}
 		return fmt.Errorf("commit migration transaction: %w", err)
@@ -67,7 +67,7 @@ func (s *Store) applyMigrations(ctx context.Context) error {
 	return nil
 }
 
-func rollbackMigration(conn *sql.Conn) error {
+func rollbackTransaction(conn *sql.Conn) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
