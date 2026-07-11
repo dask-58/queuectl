@@ -1,3 +1,4 @@
+// Package worker provides the queuectl worker runtime.
 package worker
 
 import (
@@ -15,7 +16,6 @@ import (
 const idlePollInterval = 250 * time.Millisecond
 
 // Run executes jobs from the store until the context is cancelled.
-// It uses a single foreground loop and handles basic backoff internally via timers.
 func Run(ctx context.Context, s *store.Store) (err error) {
 	workerID := uuid.NewString()
 	pid := os.Getpid()

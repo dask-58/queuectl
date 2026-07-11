@@ -2,7 +2,7 @@
 
 A Go CLI for managing a persistent SQLite-backed background job queue.
 
-**Status:** Under development.
+**Status:** Alpha.
 
 ## Usage
 
@@ -26,6 +26,32 @@ For machine-readable output, append `--json`:
 queuectl list --state pending --json
 ```
 
+### Start a worker
+
+```sh
+queuectl worker start
+```
+
+### Queue status
+
+```sh
+queuectl status
+```
+
+### Dead-letter queue
+
+```sh
+queuectl dlq list
+queuectl dlq retry <job-id>
+```
+
+### Configuration
+
+```sh
+queuectl config list
+queuectl config set max-retries 10
+```
+
 Jobs persist in the SQLite database at `./queuectl.db` by default.
 Set `QUEUECTL_DB_PATH` to override the database location.
 
@@ -33,17 +59,20 @@ The underlying storage layer provides strict concurrency safety with atomic job 
 
 ## Lifecycle
 
-Jobs transition through four storage states:
+Jobs transition through five storage states:
 - `pending`: Awaiting execution (including exponential backoff retries).
-- `processing`: Currently claimed by an execution layer.
+- `processing`: Currently claimed by a worker.
 - `completed`: Successfully finalized with `exit_code = 0`.
+- `failed`: Temporary failure awaiting retry.
 - `dead`: Failed beyond `max-retries`.
 
 ## Architecture
 
 - A durable SQLite storage foundation supporting concurrent queue claiming.
 - Safe retries with integer-based exponential backoff.
-- Execution engine supporting shell pipelines via `sh -c`. (Note: Workers are still not implemented).
+- Execution engine supporting shell pipelines via `sh -c`.
+- Single-process foreground workers with abandoned job recovery.
+- Runtime configuration managed dynamically through the CLI.
 
 ## Storage
 

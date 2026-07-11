@@ -1,3 +1,4 @@
+// Package cli provides the queuectl command-line interface.
 package cli
 
 import (
@@ -10,6 +11,7 @@ import (
 
 var ErrNotImplemented = errors.New("command not implemented")
 
+// NewRootCommand creates the root CLI command.
 func NewRootCommand(stdout, stderr io.Writer) *cobra.Command {
 	return newRootCommand(stdout, stderr, os.Getenv)
 }

@@ -6,6 +6,7 @@ import (
 	"strings"
 )
 
+// GetConfig returns every key/value pair from config ordered by key ASC.
 func (s *Store) GetConfig(ctx context.Context) (map[string]string, error) {
 	conn, err := s.db.Conn(ctx)
 	if err != nil {
@@ -35,6 +36,7 @@ func (s *Store) GetConfig(ctx context.Context) (map[string]string, error) {
 	return cfg, nil
 }
 
+// SetConfig updates exactly one existing configuration entry.
 func (s *Store) SetConfig(ctx context.Context, key, value string) error {
 	key = strings.TrimSpace(key)
 	if key == "" {

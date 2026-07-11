@@ -1,3 +1,4 @@
+// Package executor provides command execution.
 package executor
 
 import (
@@ -11,9 +12,7 @@ import (
 
 var shellPath = "sh"
 
-// Execute runs the provided job's command strictly via `sh -c`.
-// It captures stderr, ignores stdout, and distinguishes between normal process
-// exits (returned as exitCode) and infrastructure failures (returned as err).
+// Execute runs a job command and returns its exit status.
 func Execute(ctx context.Context, job store.Job) (exitCode int, stderr string, err error) {
 	cmd := exec.CommandContext(ctx, shellPath, "-c", job.Command)
 

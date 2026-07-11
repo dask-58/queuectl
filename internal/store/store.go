@@ -1,3 +1,4 @@
+// Package store provides SQLite-backed queue storage.
 package store
 
 import (
@@ -14,10 +15,12 @@ import (
 const initTimeout = 10 * time.Second
 const pragmaRetryDelay = 10 * time.Millisecond
 
+// Store provides persistent queue storage backed by SQLite.
 type Store struct {
 	db *sql.DB
 }
 
+// Open opens or creates a queue database.
 func Open(path string) (*Store, error) {
 	if strings.TrimSpace(path) == "" {
 		return nil, errors.New("database path is required")
@@ -39,6 +42,7 @@ func Open(path string) (*Store, error) {
 	return store, nil
 }
 
+// Close releases database resources.
 func (s *Store) Close() error {
 	if s == nil || s.db == nil {
 		return nil

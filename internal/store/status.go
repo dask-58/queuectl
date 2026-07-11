@@ -5,6 +5,7 @@ import (
 	"fmt"
 )
 
+// Status summarizes queue state.
 type Status struct {
 	PendingJobs    int
 	ProcessingJobs int
@@ -15,6 +16,7 @@ type Status struct {
 	ActiveWorkers int
 }
 
+// Status retrieves the aggregate queue overview.
 func (s *Store) Status(ctx context.Context) (*Status, error) {
 	conn, err := s.db.Conn(ctx)
 	if err != nil {

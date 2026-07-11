@@ -10,6 +10,7 @@ import (
 	"time"
 )
 
+// Job states define the lifecycle phases of a queued job.
 const (
 	JobStatePending    = "pending"
 	JobStateProcessing = "processing"
@@ -18,6 +19,7 @@ const (
 	JobStateDead       = "dead"
 )
 
+// Sentinel errors for common job failures.
 var (
 	ErrJobAlreadyExists = errors.New("job already exists")
 	ErrJobNotFound      = errors.New("job not found")
@@ -26,6 +28,7 @@ var (
 
 const defaultLeaseDuration = 30 * time.Second
 
+// IsValidJobState checks if the provided state is a recognized job state.
 func IsValidJobState(state string) bool {
 	switch state {
 	case JobStatePending, JobStateProcessing, JobStateCompleted, JobStateFailed, JobStateDead:
@@ -34,6 +37,7 @@ func IsValidJobState(state string) bool {
 	return false
 }
 
+// Job represents a queued job.
 type Job struct {
 	ID             string
 	Command        string
@@ -52,6 +56,7 @@ type Job struct {
 	LastError      *string
 }
 
+// Enqueue creates a new pending job.
 func (s *Store) Enqueue(ctx context.Context, id, command string) (*Job, error) {
 	id = strings.TrimSpace(id)
 	if id == "" {
@@ -150,10 +155,12 @@ func queryJobByID(ctx context.Context, q interface {
 	return j, nil
 }
 
+// Job retrieves a job by its unique identifier.
 func (s *Store) Job(ctx context.Context, id string) (*Job, error) {
 	return queryJobByID(ctx, s.db, id)
 }
 
+// ListJobsByState retrieves all jobs matching the provided state, ordered by creation time.
 func (s *Store) ListJobsByState(ctx context.Context, state string) ([]Job, error) {
 	if !IsValidJobState(state) {
 		return nil, fmt.Errorf("invalid job state: %q", state)
@@ -184,6 +191,7 @@ func (s *Store) ListJobsByState(ctx context.Context, state string) ([]Job, error
 	return jobs, nil
 }
 
+// ClaimNextJob claims the oldest runnable job for a worker.
 func (s *Store) ClaimNextJob(ctx context.Context, workerID string) (*Job, error) {
 	workerID = strings.TrimSpace(workerID)
 	if workerID == "" {
@@ -249,6 +257,7 @@ func (s *Store) ClaimNextJob(ctx context.Context, workerID string) (*Job, error)
 	return j, nil
 }
 
+// FinishJob records the result of a claimed job.
 func (s *Store) FinishJob(ctx context.Context, jobID string, exitCode int, stderr string) (*Job, error) {
 	jobID = strings.TrimSpace(jobID)
 	if jobID == "" {
@@ -342,6 +351,7 @@ func (s *Store) FinishJob(ctx context.Context, jobID string, exitCode int, stder
 	return finalJob, nil
 }
 
+// RetryDeadJob moves a dead job back to the pending state.
 func (s *Store) RetryDeadJob(ctx context.Context, id string) (*Job, error) {
 	id = strings.TrimSpace(id)
 	if id == "" {
@@ -443,6 +453,7 @@ func readIntConfig(ctx context.Context, tx *sql.Tx, key string) (int, error) {
 	return val, nil
 }
 
+// RecoverExpiredJobs releases jobs whose worker leases have expired.
 func (s *Store) RecoverExpiredJobs(ctx context.Context) (int, error) {
 	conn, err := s.db.Conn(ctx)
 	if err != nil {
