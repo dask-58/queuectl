@@ -20,6 +20,13 @@ func Run(ctx context.Context, s *store.Store) (err error) {
 	workerID := uuid.NewString()
 	pid := os.Getpid()
 
+	if _, recErr := s.RecoverExpiredJobs(ctx); recErr != nil {
+		if errors.Is(recErr, context.Canceled) || errors.Is(recErr, context.DeadlineExceeded) {
+			return nil
+		}
+		return recErr
+	}
+
 	if err := s.RegisterWorker(ctx, workerID, pid); err != nil {
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			return nil

@@ -371,6 +371,32 @@ func readIntConfig(ctx context.Context, tx *sql.Tx, key string) (int, error) {
 	return val, nil
 }
 
+func (s *Store) RecoverExpiredJobs(ctx context.Context) (int, error) {
+	conn, err := s.db.Conn(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("acquire connection: %w", err)
+	}
+	defer conn.Close()
+
+	now := time.Now().UTC().UnixMilli()
+
+	query := `UPDATE jobs
+		SET state = ?, worker_id = NULL, lease_expires_at = NULL, next_run_at = NULL, updated_at = ?
+		WHERE state = ? AND lease_expires_at <= ?`
+
+	res, err := conn.ExecContext(ctx, query, JobStatePending, now, JobStateProcessing, now)
+	if err != nil {
+		return 0, fmt.Errorf("recover expired jobs: %w", err)
+	}
+
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("check rows affected: %w", err)
+	}
+
+	return int(affected), nil
+}
+
 // isJobIDConflict detects a SQLite UNIQUE constraint violation on jobs.id,
 // isolating driver-specific error inspection to one helper.
 func isJobIDConflict(err error) bool {

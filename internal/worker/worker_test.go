@@ -132,3 +132,41 @@ func TestWorkerRunInfrastructureError(t *testing.T) {
 
 	assert.Equal(t, 0, countWorkers(t, dbPath), "worker row should disappear after Run exits on infrastructure error")
 }
+
+// 5. Worker recovers abandoned jobs on startup
+func TestWorkerRunRecoversAbandonedJob(t *testing.T) {
+	s, dbPath := openTestStore(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	job, err := s.Enqueue(ctx, "job-recovery", "echo recovery")
+	require.NoError(t, err)
+
+	// Simulate an abandoned job
+	now := time.Now().UTC().UnixMilli()
+	pastLease := now - 1000
+
+	db, err := sql.Open("sqlite", dbPath)
+	require.NoError(t, err)
+	defer db.Close()
+
+	_, err = db.ExecContext(ctx, "UPDATE jobs SET state = ?, worker_id = 'dead-worker', lease_expires_at = ? WHERE id = ?", store.JobStateProcessing, pastLease, job.ID)
+	require.NoError(t, err)
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- Run(ctx, s)
+	}()
+
+	require.Eventually(t, func() bool {
+		j, err := s.Job(context.Background(), job.ID)
+		return err == nil && j.State == store.JobStateCompleted
+	}, 2*time.Second, 10*time.Millisecond)
+
+	cancel()
+	require.NoError(t, <-errCh)
+
+	j, err := s.Job(context.Background(), job.ID)
+	require.NoError(t, err)
+	assert.Equal(t, store.JobStateCompleted, j.State)
+}

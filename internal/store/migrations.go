@@ -67,8 +67,10 @@ func (s *Store) applyMigrations(ctx context.Context) error {
 	return nil
 }
 
+const rollbackTimeout = 5 * time.Second
+
 func rollbackTransaction(conn *sql.Conn) error {
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), rollbackTimeout)
 	defer cancel()
 
 	_, err := conn.ExecContext(ctx, "ROLLBACK")
