@@ -46,7 +46,7 @@ func TestUnknownCommandsFail(t *testing.T) {
 }
 
 func TestCommandErrorsDoNotWriteToStdout(t *testing.T) {
-	err, stdout, stderr := execute("status")
+	err, stdout, stderr := execute("dlq", "list")
 	assert.ErrorIs(t, err, ErrNotImplemented)
 	assert.Empty(t, stdout)
 	assert.Empty(t, stderr)

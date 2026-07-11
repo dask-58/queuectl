@@ -31,24 +31,13 @@ func newRootCommand(stdout, stderr io.Writer, getenv func(string) string) *cobra
 	cmd.AddCommand(
 		newEnqueueCommand(getenv),
 		newWorkerCommand(getenv),
-		newStatusCommand(),
+		newStatusCommand(getenv),
 		newListCommand(getenv),
 		newDLQCommand(),
 		newConfigCommand(),
 	)
 
 	return cmd
-}
-
-func newStatusCommand() *cobra.Command {
-	return &cobra.Command{
-		Use:   "status",
-		Short: "Show queue status",
-		Args:  cobra.NoArgs,
-		RunE: func(cmd *cobra.Command, args []string) error {
-			return ErrNotImplemented
-		},
-	}
 }
 
 func newDLQCommand() *cobra.Command {
