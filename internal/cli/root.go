@@ -33,43 +33,11 @@ func newRootCommand(stdout, stderr io.Writer, getenv func(string) string) *cobra
 		newWorkerCommand(getenv),
 		newStatusCommand(getenv),
 		newListCommand(getenv),
-		newDLQCommand(),
+		newDLQCommand(getenv),
 		newConfigCommand(),
 	)
 
 	return cmd
-}
-
-func newDLQCommand() *cobra.Command {
-	cmd := &cobra.Command{
-		Use:   "dlq",
-		Short: "Manage the dead-letter queue",
-	}
-
-	cmd.AddCommand(newDLQListCommand(), newDLQRetryCommand())
-	return cmd
-}
-
-func newDLQListCommand() *cobra.Command {
-	return &cobra.Command{
-		Use:   "list",
-		Short: "List dead-lettered jobs",
-		Args:  cobra.NoArgs,
-		RunE: func(cmd *cobra.Command, args []string) error {
-			return ErrNotImplemented
-		},
-	}
-}
-
-func newDLQRetryCommand() *cobra.Command {
-	return &cobra.Command{
-		Use:   "retry <id>",
-		Short: "Retry a dead-lettered job",
-		Args:  cobra.ExactArgs(1),
-		RunE: func(cmd *cobra.Command, args []string) error {
-			return ErrNotImplemented
-		},
-	}
 }
 
 func newConfigCommand() *cobra.Command {

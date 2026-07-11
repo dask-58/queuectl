@@ -342,6 +342,78 @@ func (s *Store) FinishJob(ctx context.Context, jobID string, exitCode int, stder
 	return finalJob, nil
 }
 
+func (s *Store) RetryDeadJob(ctx context.Context, id string) (*Job, error) {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return nil, fmt.Errorf("job id is required")
+	}
+
+	conn, err := s.db.Conn(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("acquire connection: %w", err)
+	}
+	defer conn.Close()
+
+	if _, err := conn.ExecContext(ctx, "BEGIN IMMEDIATE"); err != nil {
+		return nil, fmt.Errorf("begin immediate transaction: %w", err)
+	}
+
+	var committed bool
+	defer func() {
+		if !committed {
+			_ = rollbackTransaction(conn)
+		}
+	}()
+
+	j, err := queryJobByID(ctx, conn, id)
+	if err != nil {
+		if errors.Is(err, ErrJobNotFound) {
+			return nil, ErrJobNotFound
+		}
+		return nil, fmt.Errorf("query job: %w", err)
+	}
+
+	if j.State != JobStateDead {
+		return nil, fmt.Errorf("job %q is in state %q, expected %q", id, j.State, JobStateDead)
+	}
+
+	now := time.Now().UTC().UnixMilli()
+
+	res, err := conn.ExecContext(ctx, `
+		UPDATE jobs
+		SET state = ?, worker_id = NULL, lease_expires_at = NULL, next_run_at = NULL,
+		    completed_at = NULL, exit_code = NULL, last_error = NULL, updated_at = ?
+		WHERE id = ?`,
+		JobStatePending, now, id,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("update job: %w", err)
+	}
+
+	rows, err := res.RowsAffected()
+	if err != nil {
+		return nil, fmt.Errorf("check rows affected: %w", err)
+	}
+	if rows != 1 {
+		return nil, fmt.Errorf("internal error: expected 1 row affected, got %d", rows)
+	}
+
+	updatedJob, err := queryJobByID(ctx, conn, id)
+	if err != nil {
+		if errors.Is(err, ErrJobNotFound) {
+			return nil, ErrJobNotFound
+		}
+		return nil, fmt.Errorf("requery updated job: %w", err)
+	}
+
+	if _, err := conn.ExecContext(ctx, "COMMIT"); err != nil {
+		return nil, fmt.Errorf("commit transaction: %w", err)
+	}
+	committed = true
+
+	return updatedJob, nil
+}
+
 func retryDelay(base, attempt int) time.Duration {
 	if attempt < 1 {
 		return 0

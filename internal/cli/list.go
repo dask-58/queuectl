@@ -57,28 +57,7 @@ func newListCommand(getenv func(string) string) *cobra.Command {
 				return fmt.Errorf("close store: %w", closeErr)
 			}
 
-			if jsonFlag {
-				outputs := make([]jobOutput, 0, len(jobs))
-				for _, j := range jobs {
-					outputs = append(outputs, toJobOutput(j))
-				}
-				return json.NewEncoder(cmd.OutOrStdout()).Encode(outputs)
-			}
-
-			w := tabwriter.NewWriter(cmd.OutOrStdout(), 0, 0, 2, ' ', 0)
-			if _, err := fmt.Fprintln(w, "ID\tSTATE\tATTEMPTS\tCOMMAND"); err != nil {
-				return fmt.Errorf("write list header: %w", err)
-			}
-			for _, j := range jobs {
-				if _, err := fmt.Fprintf(w, "%s\t%s\t%d\t%s\n", j.ID, j.State, j.Attempts, j.Command); err != nil {
-					return fmt.Errorf("write job row: %w", err)
-				}
-			}
-			if err := w.Flush(); err != nil {
-				return fmt.Errorf("flush list output: %w", err)
-			}
-
-			return nil
+			return renderJobList(cmd, jobs, jsonFlag)
 		},
 	}
 
@@ -87,6 +66,31 @@ func newListCommand(getenv func(string) string) *cobra.Command {
 	cmd.Flags().BoolVar(&jsonFlag, "json", false, "Output in machine-readable JSON format")
 
 	return cmd
+}
+
+func renderJobList(cmd *cobra.Command, jobs []store.Job, asJSON bool) error {
+	if asJSON {
+		outputs := make([]jobOutput, 0, len(jobs))
+		for _, j := range jobs {
+			outputs = append(outputs, toJobOutput(j))
+		}
+		return json.NewEncoder(cmd.OutOrStdout()).Encode(outputs)
+	}
+
+	w := tabwriter.NewWriter(cmd.OutOrStdout(), 0, 0, 2, ' ', 0)
+	if _, err := fmt.Fprintln(w, "ID\tSTATE\tATTEMPTS\tCOMMAND"); err != nil {
+		return fmt.Errorf("write list header: %w", err)
+	}
+	for _, j := range jobs {
+		if _, err := fmt.Fprintf(w, "%s\t%s\t%d\t%s\n", j.ID, j.State, j.Attempts, j.Command); err != nil {
+			return fmt.Errorf("write job row: %w", err)
+		}
+	}
+	if err := w.Flush(); err != nil {
+		return fmt.Errorf("flush list output: %w", err)
+	}
+
+	return nil
 }
 
 func unixMilliToRFC3339(ms int64) string {
