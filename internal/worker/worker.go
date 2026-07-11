@@ -3,7 +3,10 @@ package worker
 import (
 	"context"
 	"errors"
+	"os"
 	"time"
+
+	"github.com/google/uuid"
 
 	"github.com/dask-58/queuectl/internal/executor"
 	"github.com/dask-58/queuectl/internal/store"
@@ -13,15 +16,35 @@ const idlePollInterval = 250 * time.Millisecond
 
 // Run executes jobs from the store until the context is cancelled.
 // It uses a single foreground loop and handles basic backoff internally via timers.
-func Run(ctx context.Context, s *store.Store) error {
+func Run(ctx context.Context, s *store.Store) (err error) {
+	workerID := uuid.NewString()
+	pid := os.Getpid()
+
+	if err := s.RegisterWorker(ctx, workerID, pid); err != nil {
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return nil
+		}
+		return err
+	}
+
+	defer func() {
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if unregErr := s.UnregisterWorker(cleanupCtx, workerID); unregErr != nil {
+			if err == nil {
+				err = unregErr
+			}
+		}
+	}()
+
 	for {
 		if err := ctx.Err(); err != nil {
 			return nil
 		}
 
-		job, err := s.ClaimNextJob(ctx, "local")
-		if err != nil {
-			if errors.Is(err, store.ErrNoPendingJobs) {
+		job, claimErr := s.ClaimNextJob(ctx, workerID)
+		if claimErr != nil {
+			if errors.Is(claimErr, store.ErrNoPendingJobs) {
 				timer := time.NewTimer(idlePollInterval)
 				select {
 				case <-ctx.Done():
@@ -31,10 +54,10 @@ func Run(ctx context.Context, s *store.Store) error {
 					continue
 				}
 			}
-			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			if errors.Is(claimErr, context.Canceled) || errors.Is(claimErr, context.DeadlineExceeded) {
 				return nil
 			}
-			return err
+			return claimErr
 		}
 
 		exitCode, stderr, err := executor.Execute(ctx, *job)

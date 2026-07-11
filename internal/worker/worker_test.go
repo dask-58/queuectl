@@ -2,9 +2,12 @@ package worker
 
 import (
 	"context"
+	"database/sql"
 	"path/filepath"
 	"testing"
 	"time"
+
+	_ "modernc.org/sqlite"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -17,17 +20,30 @@ func testDBPath(t *testing.T) string {
 	return filepath.Join(t.TempDir(), "queuectl.db")
 }
 
-func openTestStore(t *testing.T) *store.Store {
+func openTestStore(t *testing.T) (*store.Store, string) {
 	t.Helper()
-	s, err := store.Open(testDBPath(t))
+	path := testDBPath(t)
+	s, err := store.Open(path)
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, s.Close()) })
-	return s
+	return s, path
+}
+
+func countWorkers(t *testing.T, path string) int {
+	t.Helper()
+	db, err := sql.Open("sqlite", path)
+	require.NoError(t, err)
+	defer db.Close()
+
+	var count int
+	err = db.QueryRow("SELECT COUNT(*) FROM workers").Scan(&count)
+	require.NoError(t, err)
+	return count
 }
 
 // 1. Worker executes one successful job.
 func TestWorkerRunSuccess(t *testing.T) {
-	s := openTestStore(t)
+	s, dbPath := openTestStore(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -44,8 +60,12 @@ func TestWorkerRunSuccess(t *testing.T) {
 		return err == nil && j.State == store.JobStateCompleted
 	}, 2*time.Second, 10*time.Millisecond)
 
+	assert.Equal(t, 1, countWorkers(t, dbPath), "worker row should exist while Run is active")
+
 	cancel()
 	require.NoError(t, <-errCh)
+
+	assert.Equal(t, 0, countWorkers(t, dbPath), "worker row should disappear after Run exits")
 
 	j, err := s.Job(context.Background(), job.ID)
 	require.NoError(t, err)
@@ -54,7 +74,7 @@ func TestWorkerRunSuccess(t *testing.T) {
 
 // 2. Worker retries failing jobs correctly.
 func TestWorkerRunRetry(t *testing.T) {
-	s := openTestStore(t)
+	s, dbPath := openTestStore(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -71,8 +91,12 @@ func TestWorkerRunRetry(t *testing.T) {
 		return err == nil && j.Attempts > 0 && j.State == store.JobStatePending
 	}, 2*time.Second, 10*time.Millisecond)
 
+	assert.Equal(t, 1, countWorkers(t, dbPath), "worker row should exist while Run is active")
+
 	cancel()
 	require.NoError(t, <-errCh)
+
+	assert.Equal(t, 0, countWorkers(t, dbPath), "worker row should disappear after Run exits")
 
 	j, err := s.Job(context.Background(), job.ID)
 	require.NoError(t, err)
@@ -82,7 +106,7 @@ func TestWorkerRunRetry(t *testing.T) {
 
 // 3. Idle worker exits when context cancelled.
 func TestWorkerRunIdleCancel(t *testing.T) {
-	s := openTestStore(t)
+	s, dbPath := openTestStore(t)
 	ctx, cancel := context.WithCancel(context.Background())
 
 	// Cancel immediately
@@ -90,11 +114,13 @@ func TestWorkerRunIdleCancel(t *testing.T) {
 
 	err := Run(ctx, s)
 	require.NoError(t, err)
+
+	assert.Equal(t, 0, countWorkers(t, dbPath), "worker row should disappear after Run exits")
 }
 
 // 4. Infrastructure error propagates.
 func TestWorkerRunInfrastructureError(t *testing.T) {
-	s := openTestStore(t)
+	s, dbPath := openTestStore(t)
 	ctx := context.Background()
 
 	// Close store to force infrastructure error
@@ -103,4 +129,6 @@ func TestWorkerRunInfrastructureError(t *testing.T) {
 
 	err = Run(ctx, s)
 	require.Error(t, err)
+
+	assert.Equal(t, 0, countWorkers(t, dbPath), "worker row should disappear after Run exits on infrastructure error")
 }
