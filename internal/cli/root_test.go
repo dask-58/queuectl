@@ -26,6 +26,13 @@ func TestRootHelpSucceeds(t *testing.T) {
 	assert.Empty(t, stderr)
 }
 
+func TestExecuteInvalidCommand(t *testing.T) {
+	err, stdout, stderr := execute("invalid_command_that_does_not_exist")
+	assert.ErrorContains(t, err, "unknown command")
+	assert.Empty(t, stdout)
+	assert.Empty(t, stderr)
+}
+
 func TestRequiredTopLevelCommandsExist(t *testing.T) {
 	_, stdout, _ := execute("--help")
 
@@ -37,17 +44,9 @@ func TestRequiredTopLevelCommandsExist(t *testing.T) {
 func TestListRequiresState(t *testing.T) {
 	err, _, _ := execute("list")
 	require.Error(t, err)
-	assert.NotErrorIs(t, err, ErrNotImplemented)
 }
 
 func TestUnknownCommandsFail(t *testing.T) {
 	err, _, _ := execute("missing")
 	assert.Error(t, err)
-}
-
-func TestCommandErrorsDoNotWriteToStdout(t *testing.T) {
-	err, stdout, stderr := execute("worker", "stop")
-	assert.ErrorIs(t, err, ErrNotImplemented)
-	assert.Empty(t, stdout)
-	assert.Empty(t, stderr)
 }

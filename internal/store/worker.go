@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"strings"
@@ -102,4 +103,55 @@ func (s *Store) UnregisterWorker(ctx context.Context, workerID string) error {
 	}
 
 	return nil
+}
+
+// RequestWorkerStop marks all active workers to stop gracefully.
+func (s *Store) RequestWorkerStop(ctx context.Context) (int, error) {
+	conn, err := s.db.Conn(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("acquire connection: %w", err)
+	}
+	defer conn.Close()
+
+	query := `UPDATE workers SET stop_requested = 1 WHERE stop_requested = 0`
+	res, err := conn.ExecContext(ctx, query)
+	if err != nil {
+		return 0, fmt.Errorf("update stop_requested: %w", err)
+	}
+
+	rows, err := res.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("get rows affected: %w", err)
+	}
+
+	return int(rows), nil
+}
+
+// ShouldStopWorker checks if a specific worker has been asked to stop.
+func (s *Store) ShouldStopWorker(ctx context.Context, workerID string) (bool, error) {
+	workerID = strings.TrimSpace(workerID)
+	if workerID == "" {
+		return false, fmt.Errorf("worker ID is required")
+	}
+
+	conn, err := s.db.Conn(ctx)
+	if err != nil {
+		return false, fmt.Errorf("acquire connection: %w", err)
+	}
+	defer conn.Close()
+
+	var stopRequested int
+	err = conn.QueryRowContext(ctx, `SELECT stop_requested FROM workers WHERE id = ?`, workerID).Scan(&stopRequested)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return false, ErrWorkerNotFound
+		}
+		// Try string match in case modernc wraps it or doesn't
+		if strings.Contains(err.Error(), "no rows") {
+			return false, ErrWorkerNotFound
+		}
+		return false, fmt.Errorf("query stop_requested: %w", err)
+	}
+
+	return stopRequested == 1, nil
 }

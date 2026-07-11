@@ -49,6 +49,17 @@ func Run(ctx context.Context, s *store.Store) (err error) {
 			return nil
 		}
 
+		stop, err := s.ShouldStopWorker(ctx, workerID)
+		if err != nil {
+			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+				return nil
+			}
+			return err
+		}
+		if stop {
+			return nil
+		}
+
 		job, claimErr := s.ClaimNextJob(ctx, workerID)
 		if claimErr != nil {
 			if errors.Is(claimErr, store.ErrNoPendingJobs) {

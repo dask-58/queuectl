@@ -2,14 +2,11 @@
 package cli
 
 import (
-	"errors"
 	"io"
 	"os"
 
 	"github.com/spf13/cobra"
 )
-
-var ErrNotImplemented = errors.New("command not implemented")
 
 // NewRootCommand creates the root CLI command.
 func NewRootCommand(stdout, stderr io.Writer) *cobra.Command {

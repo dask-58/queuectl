@@ -18,7 +18,7 @@ func newWorkerCommand(getenv func(string) string) *cobra.Command {
 		Short: "Manage workers",
 	}
 
-	cmd.AddCommand(newWorkerStartCommand(getenv), newWorkerStopCommand())
+	cmd.AddCommand(newWorkerStartCommand(getenv), newWorkerStopCommand(getenv))
 	return cmd
 }
 
@@ -47,13 +47,27 @@ func newWorkerStartCommand(getenv func(string) string) *cobra.Command {
 	return cmd
 }
 
-func newWorkerStopCommand() *cobra.Command {
+func newWorkerStopCommand(getenv func(string) string) *cobra.Command {
 	return &cobra.Command{
 		Use:   "stop",
 		Short: "Stop workers",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return ErrNotImplemented
+			dbPath := databasePath(getenv)
+
+			s, err := store.Open(dbPath)
+			if err != nil {
+				return fmt.Errorf("open store: %w", err)
+			}
+			defer s.Close()
+
+			affected, err := s.RequestWorkerStop(cmd.Context())
+			if err != nil {
+				return fmt.Errorf("request worker stop: %w", err)
+			}
+
+			fmt.Fprintf(cmd.OutOrStdout(), "Stopped %d worker(s)\n", affected)
+			return nil
 		},
 	}
 }

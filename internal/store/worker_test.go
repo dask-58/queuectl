@@ -95,3 +95,42 @@ func TestWorkerUnregister(t *testing.T) {
 	err = s.UnregisterWorker(ctx, "worker-missing")
 	require.ErrorIs(t, err, ErrWorkerNotFound)
 }
+
+func TestWorkerStopRequests(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+
+	err := s.RegisterWorker(ctx, "worker-1", 1234)
+	require.NoError(t, err)
+
+	err = s.RegisterWorker(ctx, "worker-2", 5678)
+	require.NoError(t, err)
+
+	stop1, err := s.ShouldStopWorker(ctx, "worker-1")
+	require.NoError(t, err)
+	require.False(t, stop1)
+
+	stop2, err := s.ShouldStopWorker(ctx, "worker-2")
+	require.NoError(t, err)
+	require.False(t, stop2)
+
+	affected, err := s.RequestWorkerStop(ctx)
+	require.NoError(t, err)
+	require.Equal(t, 2, affected)
+
+	stop1, err = s.ShouldStopWorker(ctx, "worker-1")
+	require.NoError(t, err)
+	require.True(t, stop1)
+
+	stop2, err = s.ShouldStopWorker(ctx, "worker-2")
+	require.NoError(t, err)
+	require.True(t, stop2)
+
+	// Idempotent
+	affected, err = s.RequestWorkerStop(ctx)
+	require.NoError(t, err)
+	require.Equal(t, 0, affected)
+
+	_, err = s.ShouldStopWorker(ctx, "worker-missing")
+	require.ErrorIs(t, err, ErrWorkerNotFound)
+}

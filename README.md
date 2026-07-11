@@ -32,6 +32,14 @@ queuectl list --state pending --json
 queuectl worker start
 ```
 
+### Stop workers
+
+Gracefully instruct all active workers to shut down after completing their current jobs:
+
+```sh
+queuectl worker stop
+```
+
 ### Queue status
 
 ```sh

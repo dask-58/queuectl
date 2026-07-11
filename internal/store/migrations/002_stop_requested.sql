@@ -1,0 +1,1 @@
+ALTER TABLE workers ADD COLUMN stop_requested INTEGER NOT NULL DEFAULT 0;

@@ -13,7 +13,7 @@ import (
 //go:embed migrations/*.sql
 var migrationFS embed.FS
 
-const latestMigrationVersion = 1
+const latestMigrationVersion = 2
 
 type migration struct {
 	version int
@@ -27,6 +27,11 @@ func migrations() []migration {
 			version: 1,
 			file:    "migrations/001_initial_schema.sql",
 			up:      seedDefaultConfig,
+		},
+		{
+			version: 2,
+			file:    "migrations/002_stop_requested.sql",
+			up:      nil,
 		},
 	}
 }

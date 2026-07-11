@@ -170,3 +170,49 @@ func TestWorkerRunRecoversAbandonedJob(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, store.JobStateCompleted, j.State)
 }
+
+// 6. Worker gracefully exits when stop is requested
+func TestWorkerRunStopGracefully(t *testing.T) {
+	s, dbPath := openTestStore(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// Enqueue a long running job and a second job
+	job1, err := s.Enqueue(ctx, "job-1", "sleep 1")
+	require.NoError(t, err)
+
+	job2, err := s.Enqueue(ctx, "job-2", "echo job-2")
+	require.NoError(t, err)
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- Run(ctx, s)
+	}()
+
+	// Wait for job-1 to start processing
+	require.Eventually(t, func() bool {
+		j, err := s.Job(context.Background(), job1.ID)
+		return err == nil && j.State == store.JobStateProcessing
+	}, 2*time.Second, 10*time.Millisecond)
+
+	// Request stop while job-1 is executing
+	affected, err := s.RequestWorkerStop(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, 1, affected)
+
+	// Wait for the worker to exit naturally (without context cancel)
+	require.NoError(t, <-errCh)
+
+	// The worker should unregister itself
+	assert.Equal(t, 0, countWorkers(t, dbPath), "worker row should disappear after graceful exit")
+
+	// Verify job-1 completed
+	j1, err := s.Job(context.Background(), job1.ID)
+	require.NoError(t, err)
+	assert.Equal(t, store.JobStateCompleted, j1.State)
+
+	// Verify job-2 remained pending (was not claimed)
+	j2, err := s.Job(context.Background(), job2.ID)
+	require.NoError(t, err)
+	assert.Equal(t, store.JobStatePending, j2.State)
+}
