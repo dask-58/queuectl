@@ -34,24 +34,6 @@ func TestRequiredTopLevelCommandsExist(t *testing.T) {
 	}
 }
 
-func TestWorkerStartDefaultsCountToOne(t *testing.T) {
-	err, stdout, _ := execute("worker", "start")
-	assert.ErrorIs(t, err, ErrNotImplemented)
-	assert.Empty(t, stdout)
-}
-
-func TestWorkerStartRejectsZeroCount(t *testing.T) {
-	err, _, _ := execute("worker", "start", "--count", "0")
-	require.Error(t, err)
-	assert.NotErrorIs(t, err, ErrNotImplemented)
-}
-
-func TestWorkerStartRejectsNegativeCount(t *testing.T) {
-	err, _, _ := execute("worker", "start", "--count", "-1")
-	require.Error(t, err)
-	assert.NotErrorIs(t, err, ErrNotImplemented)
-}
-
 func TestListRequiresState(t *testing.T) {
 	err, _, _ := execute("list")
 	require.Error(t, err)

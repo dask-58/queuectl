@@ -2,7 +2,6 @@ package cli
 
 import (
 	"errors"
-	"fmt"
 	"io"
 	"os"
 
@@ -31,7 +30,7 @@ func newRootCommand(stdout, stderr io.Writer, getenv func(string) string) *cobra
 
 	cmd.AddCommand(
 		newEnqueueCommand(getenv),
-		newWorkerCommand(),
+		newWorkerCommand(getenv),
 		newStatusCommand(),
 		newListCommand(getenv),
 		newDLQCommand(),
@@ -39,46 +38,6 @@ func newRootCommand(stdout, stderr io.Writer, getenv func(string) string) *cobra
 	)
 
 	return cmd
-}
-
-func newWorkerCommand() *cobra.Command {
-	cmd := &cobra.Command{
-		Use:   "worker",
-		Short: "Manage workers",
-	}
-
-	cmd.AddCommand(newWorkerStartCommand(), newWorkerStopCommand())
-	return cmd
-}
-
-func newWorkerStartCommand() *cobra.Command {
-	var count int
-
-	cmd := &cobra.Command{
-		Use:   "start",
-		Short: "Start workers",
-		Args:  cobra.NoArgs,
-		RunE: func(cmd *cobra.Command, args []string) error {
-			if count <= 0 {
-				return fmt.Errorf("count must be greater than zero")
-			}
-			return ErrNotImplemented
-		},
-	}
-
-	cmd.Flags().IntVar(&count, "count", 1, "number of workers to start")
-	return cmd
-}
-
-func newWorkerStopCommand() *cobra.Command {
-	return &cobra.Command{
-		Use:   "stop",
-		Short: "Stop workers",
-		Args:  cobra.NoArgs,
-		RunE: func(cmd *cobra.Command, args []string) error {
-			return ErrNotImplemented
-		},
-	}
 }
 
 func newStatusCommand() *cobra.Command {
