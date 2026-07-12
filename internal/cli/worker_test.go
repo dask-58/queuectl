@@ -40,6 +40,36 @@ func TestWorkerStartCLI(t *testing.T) {
 	require.NoError(t, err, "expected command to exit cleanly on cancel")
 }
 
+func TestWorkerStartCountCLI(t *testing.T) {
+	dbPath := testDBPathWorker(t)
+	getenv := func(key string) string {
+		if key == "QUEUECTL_DB_PATH" {
+			return dbPath
+		}
+		return ""
+	}
+
+	var stdout, stderr bytes.Buffer
+	cmd := newRootCommand(&stdout, &stderr, getenv)
+	cmd.SetArgs([]string{"worker", "start", "--count", "3"})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	cmd.SetContext(ctx)
+
+	err := cmd.Execute()
+	require.NoError(t, err, "expected counted workers to exit cleanly on cancel")
+}
+
+func TestWorkerStartRejectsInvalidCount(t *testing.T) {
+	getenv, _ := testGetenv(t)
+
+	err, stdout, _ := executeWithEnv(getenv, "worker", "start", "--count", "0")
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "count")
+	require.Empty(t, stdout)
+}
+
 func TestWorkerStopCLI(t *testing.T) {
 	dbPath := testDBPathWorker(t)
 

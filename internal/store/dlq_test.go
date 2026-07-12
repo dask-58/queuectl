@@ -22,8 +22,8 @@ func TestRetryDeadJobSuccess(t *testing.T) {
 			lease_expires_at, started_at, completed_at, exit_code, last_error
 		) VALUES (
 			?, 'echo dead', ?, 3, 3, 2, 
-			100, 200, 300, 'worker-1', 
-			400, 500, 600, 1, 'some error'
+			100, 200, 300, NULL, 
+			NULL, 500, 600, 1, 'some error'
 		)
 	`, "job-dead", JobStateDead)
 	require.NoError(t, err)
@@ -66,14 +66,9 @@ func TestRetryDeadJobWrongState(t *testing.T) {
 	states := []string{JobStatePending, JobStateProcessing, JobStateCompleted, JobStateFailed}
 	for _, state := range states {
 		t.Run(state, func(t *testing.T) {
-			_, err := s.db.Exec(`
-				INSERT INTO jobs (
-					id, command, state, attempts, max_retries, backoff_base, created_at, updated_at
-				) VALUES (?, 'echo', ?, 0, 3, 2, 100, 100)
-			`, "job-"+state, state)
-			require.NoError(t, err)
+			insertJob(t, s, "job-"+state, state, 0, 3, 2)
 
-			_, err = s.RetryDeadJob(ctx, "job-"+state)
+			_, err := s.RetryDeadJob(ctx, "job-"+state)
 			assert.Error(t, err)
 			assert.Contains(t, err.Error(), "expected \"dead\"")
 		})

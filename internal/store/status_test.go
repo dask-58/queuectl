@@ -70,6 +70,22 @@ func TestStatusActiveWorkers(t *testing.T) {
 	assert.Equal(t, 1, st.ActiveWorkers)
 }
 
+func TestStatusIgnoresStaleWorkers(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+
+	err := s.RegisterWorker(ctx, "worker-1", 111)
+	require.NoError(t, err)
+
+	staleHeartbeat := time.Now().UTC().UnixMilli() - defaultLeaseDuration.Milliseconds() - 1
+	_, err = s.db.Exec("UPDATE workers SET heartbeat_at = ? WHERE id = ?", staleHeartbeat, "worker-1")
+	require.NoError(t, err)
+
+	st, err := s.Status(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, 0, st.ActiveWorkers)
+}
+
 func TestStatusSurvivesReopen(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "queuectl.db")
 	s, err := Open(path)

@@ -133,12 +133,12 @@ func TestListJSONOptionalLifecycleFields(t *testing.T) {
 			id, command, state, attempts, max_retries, backoff_base, created_at, updated_at,
 			next_run_at, worker_id, lease_expires_at, started_at, completed_at, exit_code, last_error
 		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		"jobC", "cmd", store.JobStateCompleted, 2, 3, 2, 100, 200,
-		1000, "worker1", 2000, 3000, 4000, 1, "boom",
+		"jobC", "cmd", store.JobStateProcessing, 2, 3, 2, 100, 200,
+		nil, "worker1", 2000, 3000, nil, nil, nil,
 	)
 	require.NoError(t, err)
 
-	err, stdout, _ := executeWithEnv(getenv, "list", "--state", "completed", "--json")
+	err, stdout, _ := executeWithEnv(getenv, "list", "--state", "processing", "--json")
 	require.NoError(t, err)
 
 	var jobs []jobOutput
@@ -146,9 +146,7 @@ func TestListJSONOptionalLifecycleFields(t *testing.T) {
 	require.Len(t, jobs, 1)
 
 	job := jobs[0]
-	assert.NotNil(t, job.NextRunAt)
-	_, err = time.Parse(time.RFC3339Nano, *job.NextRunAt)
-	assert.NoError(t, err)
+	assert.Nil(t, job.NextRunAt)
 
 	assert.NotNil(t, job.WorkerID)
 	assert.Equal(t, "worker1", *job.WorkerID)
@@ -161,15 +159,11 @@ func TestListJSONOptionalLifecycleFields(t *testing.T) {
 	_, err = time.Parse(time.RFC3339Nano, *job.StartedAt)
 	assert.NoError(t, err)
 
-	assert.NotNil(t, job.CompletedAt)
-	_, err = time.Parse(time.RFC3339Nano, *job.CompletedAt)
-	assert.NoError(t, err)
+	assert.Nil(t, job.CompletedAt)
 
-	assert.NotNil(t, job.ExitCode)
-	assert.Equal(t, 1, *job.ExitCode)
+	assert.Nil(t, job.ExitCode)
 
-	assert.NotNil(t, job.LastError)
-	assert.Equal(t, "boom", *job.LastError)
+	assert.Nil(t, job.LastError)
 }
 
 func TestListHumanOutput(t *testing.T) {

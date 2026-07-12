@@ -547,11 +547,10 @@ func TestEnqueueInvalidConfigValue(t *testing.T) {
 	ctx := context.Background()
 
 	_, err := s.db.Exec("UPDATE config SET value = 'not-a-number' WHERE key = 'max-retries'")
-	require.NoError(t, err)
+	assert.Error(t, err)
 
 	_, err = s.Enqueue(ctx, "job-1", "echo hello")
-	assert.Error(t, err)
-	assert.ErrorContains(t, err, "max-retries")
+	require.NoError(t, err)
 }
 
 func TestEnqueueInvalidConfigRange(t *testing.T) {
@@ -567,14 +566,9 @@ func TestEnqueueInvalidConfigRange(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			s := openTestStore(t)
-			ctx := context.Background()
 
 			_, err := s.db.Exec("UPDATE config SET value = ? WHERE key = ?", tt.value, tt.key)
-			require.NoError(t, err)
-
-			_, err = s.Enqueue(ctx, "job-1", "echo hello")
 			assert.Error(t, err)
-			assert.ErrorContains(t, err, tt.key)
 		})
 	}
 }
@@ -714,12 +708,12 @@ func TestListJobsByStateScansNullableFields(t *testing.T) {
 			id, command, state, attempts, max_retries, backoff_base, created_at, updated_at,
 			next_run_at, worker_id, lease_expires_at, started_at, completed_at, exit_code, last_error
 		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		"job-1", "cmd", JobStateCompleted, 2, 3, 2, 100, 200,
+		"job-1", "cmd", JobStateProcessing, 2, 3, 2, 100, 200,
 		t1, workerID, t2, t3, t4, exitCode, lastErr,
 	)
 	require.NoError(t, err)
 
-	jobs, err := s.ListJobsByState(ctx, JobStateCompleted)
+	jobs, err := s.ListJobsByState(ctx, JobStateProcessing)
 	require.NoError(t, err)
 	require.Len(t, jobs, 1)
 
@@ -763,6 +757,7 @@ func TestClaimNextJobSuccess(t *testing.T) {
 	assert.NotNil(t, job.LeaseExpiresAt)
 	expectedLease := *job.StartedAt + defaultLeaseDuration.Milliseconds()
 	assert.Equal(t, expectedLease, *job.LeaseExpiresAt)
+	assert.Nil(t, job.NextRunAt)
 
 	// UpdatedAt should be changed
 	assert.GreaterOrEqual(t, job.UpdatedAt, job.CreatedAt)
@@ -780,11 +775,30 @@ func TestClaimNextJobIgnoresOtherStates(t *testing.T) {
 
 	insertJob(t, s, "job-proc", JobStateProcessing, 0, 3, 2)
 	insertJob(t, s, "job-comp", JobStateCompleted, 0, 3, 2)
-	insertJob(t, s, "job-fail", JobStateFailed, 0, 3, 2)
 	insertJob(t, s, "job-dead", JobStateDead, 0, 3, 2)
 
 	_, err := s.ClaimNextJob(ctx, "worker-1")
 	assert.ErrorIs(t, err, ErrNoPendingJobs)
+}
+
+func TestClaimNextJobClaimsDueFailedJob(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+
+	past := time.Now().UTC().UnixMilli() - 1000
+	_, err := s.db.Exec(`INSERT INTO jobs (
+			id, command, state, attempts, max_retries, backoff_base,
+			created_at, updated_at, next_run_at, last_error, exit_code
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		"job-failed", "cmd", JobStateFailed, 1, 3, 2, 1, 1, past, "boom", 1,
+	)
+	require.NoError(t, err)
+
+	job, err := s.ClaimNextJob(ctx, "worker-1")
+	require.NoError(t, err)
+	assert.Equal(t, "job-failed", job.ID)
+	assert.Equal(t, JobStateProcessing, job.State)
+	assert.Nil(t, job.NextRunAt)
 }
 
 func TestClaimNextJobFIFO(t *testing.T) {
@@ -1056,13 +1070,13 @@ func TestRetryDelay(t *testing.T) {
 		attempt int
 		want    time.Duration
 	}{
-		{2, 1, time.Second},
-		{2, 2, 2 * time.Second},
-		{2, 3, 4 * time.Second},
-		{2, 4, 8 * time.Second},
-		{3, 1, time.Second},
-		{3, 2, 3 * time.Second},
-		{3, 3, 9 * time.Second},
+		{2, 1, 2 * time.Second},
+		{2, 2, 4 * time.Second},
+		{2, 3, 8 * time.Second},
+		{2, 4, 16 * time.Second},
+		{3, 1, 3 * time.Second},
+		{3, 2, 9 * time.Second},
+		{3, 3, 27 * time.Second},
 		{2, 0, 0},
 		{2, -1, 0},
 	}
@@ -1124,7 +1138,7 @@ func TestFinishJobFailureBelowRetryLimit(t *testing.T) {
 	job, err := s.FinishJob(ctx, "job-1", 1, "some error")
 	require.NoError(t, err)
 
-	assert.Equal(t, JobStatePending, job.State)          // 7
+	assert.Equal(t, JobStateFailed, job.State)           // 7
 	assert.Equal(t, claimedJob.Attempts+1, job.Attempts) // 8
 	assert.NotNil(t, job.NextRunAt)                      // 9
 	assert.NotNil(t, job.LastError)                      // 10
@@ -1216,6 +1230,33 @@ func TestFinishJobExitCodeNegativeAccepted(t *testing.T) { // 21
 	assert.Equal(t, -1, *job.ExitCode)
 }
 
+func TestFinishJobOwnedRejectsWrongWorker(t *testing.T) {
+	s, _ := setupFinishJobTest(t)
+	ctx := context.Background()
+
+	_, err := s.FinishJobOwned(ctx, "worker-2", "job-1", 0, "")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "owned by another worker")
+
+	job, err := s.Job(ctx, "job-1")
+	require.NoError(t, err)
+	assert.Equal(t, JobStateProcessing, job.State)
+	assert.NotNil(t, job.WorkerID)
+	assert.Equal(t, "worker-1", *job.WorkerID)
+}
+
+func TestJobStateInvariantRejectsOwnerOnPendingJob(t *testing.T) {
+	s := openTestStore(t)
+
+	_, err := s.db.Exec(`INSERT INTO jobs (
+			id, command, state, attempts, max_retries, backoff_base,
+			created_at, updated_at, worker_id, lease_expires_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		"job-invalid", "cmd", JobStatePending, 0, 3, 2, 1, 1, "worker-1", int64(2),
+	)
+	require.Error(t, err)
+}
+
 // --- Claim integration test ---
 
 func TestClaimNextJobIntegrationBackoff(t *testing.T) { // 20
@@ -1289,6 +1330,27 @@ func countRows(t *testing.T, store *Store, query string) int {
 func insertJob(t *testing.T, store *Store, id, state string, attempts, maxRetries, backoffBase int) {
 	t.Helper()
 
+	if state == JobStateProcessing {
+		_, err := store.db.Exec(
+			`INSERT INTO jobs (
+				id, command, state, attempts, max_retries, backoff_base,
+				created_at, updated_at, worker_id, lease_expires_at
+			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			id,
+			"echo hello",
+			state,
+			attempts,
+			maxRetries,
+			backoffBase,
+			1,
+			1,
+			"worker-1",
+			int64(2),
+		)
+		require.NoError(t, err)
+		return
+	}
+
 	_, err := store.db.Exec(
 		`INSERT INTO jobs (
 			id, command, state, attempts, max_retries, backoff_base, created_at, updated_at
@@ -1303,4 +1365,25 @@ func insertJob(t *testing.T, store *Store, id, state string, attempts, maxRetrie
 		1,
 	)
 	require.NoError(t, err)
+}
+
+func TestListRecentJobs(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+
+	// Create 3 jobs, with slight delays to ensure created_at differs slightly if needed.
+	// We'll just rely on the ID desc ordering for same created_at.
+	_, err := s.Enqueue(ctx, "job-1", "cmd 1")
+	require.NoError(t, err)
+	_, err = s.Enqueue(ctx, "job-2", "cmd 2")
+	require.NoError(t, err)
+	_, err = s.Enqueue(ctx, "job-3", "cmd 3")
+	require.NoError(t, err)
+
+	jobs, err := s.ListRecentJobs(ctx, 2)
+	require.NoError(t, err)
+
+	require.Len(t, jobs, 2)
+	assert.Equal(t, "job-3", jobs[0].ID)
+	assert.Equal(t, "job-2", jobs[1].ID)
 }

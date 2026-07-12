@@ -34,6 +34,7 @@ func newRootCommand(stdout, stderr io.Writer, getenv func(string) string) *cobra
 		newListCommand(getenv),
 		newDLQCommand(getenv),
 		newConfigCommand(getenv),
+		newDashboardCommand(getenv),
 	)
 
 	return cmd

@@ -88,7 +88,7 @@ func TestWorkerRunRetry(t *testing.T) {
 
 	require.Eventually(t, func() bool {
 		j, err := s.Job(context.Background(), job.ID)
-		return err == nil && j.Attempts > 0 && j.State == store.JobStatePending
+		return err == nil && j.Attempts > 0 && j.State == store.JobStateFailed
 	}, 2*time.Second, 10*time.Millisecond)
 
 	assert.Equal(t, 1, countWorkers(t, dbPath), "worker row should exist while Run is active")
@@ -101,7 +101,7 @@ func TestWorkerRunRetry(t *testing.T) {
 	j, err := s.Job(context.Background(), job.ID)
 	require.NoError(t, err)
 	assert.Greater(t, j.Attempts, 0)
-	assert.Equal(t, store.JobStatePending, j.State)
+	assert.Equal(t, store.JobStateFailed, j.State)
 }
 
 // 3. Idle worker exits when context cancelled.
@@ -215,4 +215,31 @@ func TestWorkerRunStopGracefully(t *testing.T) {
 	j2, err := s.Job(context.Background(), job2.ID)
 	require.NoError(t, err)
 	assert.Equal(t, store.JobStatePending, j2.State)
+}
+
+func TestWorkerRunContextCancelFinishesCurrentJob(t *testing.T) {
+	s, dbPath := openTestStore(t)
+	ctx, cancel := context.WithCancel(context.Background())
+
+	job, err := s.Enqueue(ctx, "job-1", "sleep 1")
+	require.NoError(t, err)
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- Run(ctx, s)
+	}()
+
+	require.Eventually(t, func() bool {
+		j, err := s.Job(context.Background(), job.ID)
+		return err == nil && j.State == store.JobStateProcessing
+	}, 2*time.Second, 10*time.Millisecond)
+
+	cancel()
+	require.NoError(t, <-errCh)
+
+	assert.Equal(t, 0, countWorkers(t, dbPath), "worker row should disappear after graceful exit")
+
+	j, err := s.Job(context.Background(), job.ID)
+	require.NoError(t, err)
+	assert.Equal(t, store.JobStateCompleted, j.State)
 }

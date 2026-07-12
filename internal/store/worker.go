@@ -60,10 +60,21 @@ func (s *Store) Heartbeat(ctx context.Context, workerID string) error {
 	}
 	defer conn.Close()
 
-	now := time.Now().UnixMilli()
-	query := `UPDATE workers SET heartbeat_at = ? WHERE id = ?`
+	now := time.Now().UTC().UnixMilli()
+	leaseExpiresAt := now + defaultLeaseDuration.Milliseconds()
 
-	res, err := conn.ExecContext(ctx, query, now, workerID)
+	if _, err := conn.ExecContext(ctx, "BEGIN IMMEDIATE"); err != nil {
+		return fmt.Errorf("begin immediate transaction: %w", err)
+	}
+
+	var committed bool
+	defer func() {
+		if !committed {
+			_ = rollbackTransaction(conn)
+		}
+	}()
+
+	res, err := conn.ExecContext(ctx, `UPDATE workers SET heartbeat_at = ? WHERE id = ?`, now, workerID)
 	if err != nil {
 		return fmt.Errorf("update worker heartbeat: %w", err)
 	}
@@ -75,6 +86,18 @@ func (s *Store) Heartbeat(ctx context.Context, workerID string) error {
 	if rowsAffected == 0 {
 		return ErrWorkerNotFound
 	}
+
+	if _, err := conn.ExecContext(ctx,
+		`UPDATE jobs SET lease_expires_at = ?, updated_at = ? WHERE state = ? AND worker_id = ?`,
+		leaseExpiresAt, now, JobStateProcessing, workerID,
+	); err != nil {
+		return fmt.Errorf("extend processing leases: %w", err)
+	}
+
+	if _, err := conn.ExecContext(ctx, "COMMIT"); err != nil {
+		return fmt.Errorf("commit transaction: %w", err)
+	}
+	committed = true
 
 	return nil
 }
@@ -113,8 +136,9 @@ func (s *Store) RequestWorkerStop(ctx context.Context) (int, error) {
 	}
 	defer conn.Close()
 
-	query := `UPDATE workers SET stop_requested = 1 WHERE stop_requested = 0`
-	res, err := conn.ExecContext(ctx, query)
+	activeAfter := time.Now().UTC().UnixMilli() - defaultLeaseDuration.Milliseconds()
+	query := `UPDATE workers SET stop_requested = 1 WHERE stop_requested = 0 AND heartbeat_at > ?`
+	res, err := conn.ExecContext(ctx, query, activeAfter)
 	if err != nil {
 		return 0, fmt.Errorf("update stop_requested: %w", err)
 	}
@@ -144,10 +168,6 @@ func (s *Store) ShouldStopWorker(ctx context.Context, workerID string) (bool, er
 	err = conn.QueryRowContext(ctx, `SELECT stop_requested FROM workers WHERE id = ?`, workerID).Scan(&stopRequested)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return false, ErrWorkerNotFound
-		}
-		// Try string match in case modernc wraps it or doesn't
-		if strings.Contains(err.Error(), "no rows") {
 			return false, ErrWorkerNotFound
 		}
 		return false, fmt.Errorf("query stop_requested: %w", err)

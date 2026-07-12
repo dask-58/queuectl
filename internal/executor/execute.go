@@ -34,15 +34,8 @@ func Execute(ctx context.Context, job store.Job) (exitCode int, stderr string, e
 		return 0, "", err
 	}
 
-	if runErr != nil {
-		if code, ok := exitCodeFromErr(runErr); ok {
-			return code, capturedStderr, nil
-		}
-		// Non-process errors like context cancellation, executable not found, fork failure
-		return 0, "", runErr
-	}
-
-	return 0, capturedStderr, nil
+	// Non-process errors: executable not found, fork failure, etc.
+	return 0, "", runErr
 }
 
 func exitCodeFromErr(err error) (int, bool) {

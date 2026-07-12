@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"fmt"
+	"time"
 )
 
 // Status summarizes queue state.
@@ -52,8 +53,9 @@ func (s *Store) Status(ctx context.Context) (*Status, error) {
 		return nil, fmt.Errorf("query job status: %w", err)
 	}
 
-	queryWorkers := `SELECT COUNT(*) FROM workers`
-	if err := conn.QueryRowContext(ctx, queryWorkers).Scan(&st.ActiveWorkers); err != nil {
+	activeAfter := time.Now().UTC().UnixMilli() - defaultLeaseDuration.Milliseconds()
+	queryWorkers := `SELECT COUNT(*) FROM workers WHERE heartbeat_at > ?`
+	if err := conn.QueryRowContext(ctx, queryWorkers, activeAfter).Scan(&st.ActiveWorkers); err != nil {
 		return nil, fmt.Errorf("query worker status: %w", err)
 	}
 

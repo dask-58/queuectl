@@ -3,7 +3,9 @@ package store
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"strings"
+	"time"
 )
 
 // GetConfig returns every key/value pair from config ordered by key ASC.
@@ -42,6 +44,9 @@ func (s *Store) SetConfig(ctx context.Context, key, value string) error {
 	if key == "" {
 		return fmt.Errorf("config key is required")
 	}
+	if err := validateConfigValue(key, value); err != nil {
+		return err
+	}
 
 	conn, err := s.db.Conn(ctx)
 	if err != nil {
@@ -49,7 +54,9 @@ func (s *Store) SetConfig(ctx context.Context, key, value string) error {
 	}
 	defer conn.Close()
 
-	res, err := conn.ExecContext(ctx, `UPDATE config SET value = ? WHERE key = ?`, value, key)
+	now := time.Now().UTC().UnixMilli()
+
+	res, err := conn.ExecContext(ctx, `UPDATE config SET value = ?, updated_at = ? WHERE key = ?`, value, now, key)
 	if err != nil {
 		return fmt.Errorf("update config: %w", err)
 	}
@@ -60,6 +67,32 @@ func (s *Store) SetConfig(ctx context.Context, key, value string) error {
 	}
 	if rows == 0 {
 		return fmt.Errorf("unknown config key %q", key)
+	}
+
+	return nil
+}
+
+func validateConfigValue(key, value string) error {
+	switch key {
+	case "max-retries", "backoff-base":
+	default:
+		return fmt.Errorf("unknown config key %q", key)
+	}
+
+	n, err := strconv.Atoi(value)
+	if err != nil || strconv.Itoa(n) != value {
+		return fmt.Errorf("invalid config %q: must be an integer", key)
+	}
+
+	switch key {
+	case "max-retries":
+		if n < 0 {
+			return fmt.Errorf("invalid config %q: must be >= 0", key)
+		}
+	case "backoff-base":
+		if n < 1 {
+			return fmt.Errorf("invalid config %q: must be >= 1", key)
+		}
 	}
 
 	return nil

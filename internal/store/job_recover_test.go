@@ -12,8 +12,13 @@ import (
 func insertDetailedJob(t *testing.T, s *Store, id, state string, leaseExpiresAt *int64) {
 	t.Helper()
 	var lease interface{} = leaseExpiresAt
+	var worker interface{} = "worker-1"
 	if leaseExpiresAt == nil {
 		lease = nil
+	}
+	if state != JobStateProcessing {
+		lease = nil
+		worker = nil
 	}
 
 	_, err := s.db.Exec(`
@@ -23,10 +28,10 @@ func insertDetailedJob(t *testing.T, s *Store, id, state string, leaseExpiresAt 
 			lease_expires_at, started_at, completed_at, exit_code, last_error
 		) VALUES (
 			?, 'echo test', ?, 2, 5, 2, 
-			100, 200, 300, 'worker-1', 
+			100, 200, 300, ?, 
 			?, 400, NULL, NULL, NULL
 		)
-	`, id, state, lease)
+	`, id, state, worker, lease)
 	require.NoError(t, err)
 }
 
@@ -76,19 +81,6 @@ func TestRecoverExpiredJobs(t *testing.T) {
 		assert.NotNil(t, job.WorkerID)
 	})
 
-	t.Run("processing with NULL lease unchanged", func(t *testing.T) {
-		s := openTestStore(t)
-		insertDetailedJob(t, s, "job-1", JobStateProcessing, nil)
-
-		count, err := s.RecoverExpiredJobs(ctx)
-		require.NoError(t, err)
-		assert.Equal(t, 0, count)
-
-		job, err := s.Job(ctx, "job-1")
-		require.NoError(t, err)
-		assert.Equal(t, JobStateProcessing, job.State)
-	})
-
 	t.Run("other states unchanged", func(t *testing.T) {
 		states := []string{JobStateCompleted, JobStateFailed, JobStateDead, JobStatePending}
 		for _, state := range states {
@@ -116,7 +108,7 @@ func TestRecoverExpiredJobs(t *testing.T) {
 		insertDetailedJob(t, s, "job-1", JobStateProcessing, &pastLease)
 		insertDetailedJob(t, s, "job-2", JobStateProcessing, &pastLease)
 		insertDetailedJob(t, s, "job-3", JobStateProcessing, &futureLease)
-		insertDetailedJob(t, s, "job-4", JobStateProcessing, nil)
+		insertDetailedJob(t, s, "job-4", JobStateProcessing, &futureLease)
 
 		count, err := s.RecoverExpiredJobs(ctx)
 		require.NoError(t, err)

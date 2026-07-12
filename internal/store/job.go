@@ -191,6 +191,33 @@ func (s *Store) ListJobsByState(ctx context.Context, state string) ([]Job, error
 	return jobs, nil
 }
 
+// ListRecentJobs retrieves the most recently created jobs up to a limit.
+func (s *Store) ListRecentJobs(ctx context.Context, limit int) ([]Job, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id, command, state, attempts, max_retries, backoff_base,
+				created_at, updated_at, next_run_at, worker_id,
+				lease_expires_at, started_at, completed_at, exit_code, last_error
+		 FROM jobs ORDER BY created_at DESC, id DESC LIMIT ?`, limit)
+	if err != nil {
+		return nil, fmt.Errorf("query recent jobs: %w", err)
+	}
+	defer rows.Close()
+
+	jobs := make([]Job, 0)
+	for rows.Next() {
+		j, err := scanJob(rows)
+		if err != nil {
+			return nil, fmt.Errorf("scan job: %w", err)
+		}
+		jobs = append(jobs, *j)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate jobs: %w", err)
+	}
+
+	return jobs, nil
+}
+
 // ClaimNextJob claims the oldest runnable job for a worker.
 func (s *Store) ClaimNextJob(ctx context.Context, workerID string) (*Job, error) {
 	workerID = strings.TrimSpace(workerID)
@@ -204,10 +231,12 @@ func (s *Store) ClaimNextJob(ctx context.Context, workerID string) (*Job, error)
 	}
 	defer conn.Close()
 
+	// acquire a write lock so no other worker claims this job concurrently
 	if _, err := conn.ExecContext(ctx, "BEGIN IMMEDIATE"); err != nil {
 		return nil, fmt.Errorf("begin immediate transaction: %w", err)
 	}
 
+	// if anything goes wrong, rollback the transaction to release the write lock
 	var committed bool
 	defer func() {
 		if !committed {
@@ -218,7 +247,13 @@ func (s *Store) ClaimNextJob(ctx context.Context, workerID string) (*Job, error)
 	now := time.Now().UTC().UnixMilli()
 
 	var id string
-	err = conn.QueryRowContext(ctx, "SELECT id FROM jobs WHERE state = ? AND (next_run_at IS NULL OR next_run_at <= ?) ORDER BY created_at ASC, id ASC LIMIT 1", JobStatePending, now).Scan(&id)
+	err = conn.QueryRowContext(ctx,
+		`SELECT id FROM jobs
+		 WHERE state IN (?, ?) AND (next_run_at IS NULL OR next_run_at <= ?)
+		 ORDER BY created_at ASC, id ASC LIMIT 1`,
+		JobStatePending, JobStateFailed, now,
+	).Scan(&id)
+	// no rows matches the criteria, meaning there are no pending jobs to claim
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNoPendingJobs
 	}
@@ -229,7 +264,7 @@ func (s *Store) ClaimNextJob(ctx context.Context, workerID string) (*Job, error)
 	expiresAt := now + defaultLeaseDuration.Milliseconds()
 
 	res, err := conn.ExecContext(ctx,
-		`UPDATE jobs SET state = ?, worker_id = ?, started_at = ?, lease_expires_at = ?, updated_at = ? WHERE id = ?`,
+		`UPDATE jobs SET state = ?, worker_id = ?, started_at = ?, lease_expires_at = ?, next_run_at = NULL, updated_at = ? WHERE id = ?`,
 		JobStateProcessing, workerID, now, expiresAt, now, id,
 	)
 	if err != nil {
@@ -249,6 +284,7 @@ func (s *Store) ClaimNextJob(ctx context.Context, workerID string) (*Job, error)
 		return nil, fmt.Errorf("query updated job: %w", err)
 	}
 
+	// close the transaction to release the write lock so other workers can claim jobs
 	if _, err := conn.ExecContext(ctx, "COMMIT"); err != nil {
 		return nil, fmt.Errorf("commit transaction: %w", err)
 	}
@@ -259,6 +295,19 @@ func (s *Store) ClaimNextJob(ctx context.Context, workerID string) (*Job, error)
 
 // FinishJob records the result of a claimed job.
 func (s *Store) FinishJob(ctx context.Context, jobID string, exitCode int, stderr string) (*Job, error) {
+	return s.finishJob(ctx, "", jobID, exitCode, stderr)
+}
+
+// FinishJobOwned records the result only if the job is still owned by workerID.
+func (s *Store) FinishJobOwned(ctx context.Context, workerID, jobID string, exitCode int, stderr string) (*Job, error) {
+	workerID = strings.TrimSpace(workerID)
+	if workerID == "" {
+		return nil, fmt.Errorf("worker ID is required")
+	}
+	return s.finishJob(ctx, workerID, jobID, exitCode, stderr)
+}
+
+func (s *Store) finishJob(ctx context.Context, workerID, jobID string, exitCode int, stderr string) (*Job, error) {
 	jobID = strings.TrimSpace(jobID)
 	if jobID == "" {
 		return nil, fmt.Errorf("job ID is required")
@@ -292,6 +341,9 @@ func (s *Store) FinishJob(ctx context.Context, jobID string, exitCode int, stder
 	if currentJob.State != JobStateProcessing {
 		return nil, fmt.Errorf("job %q is in state %q, expected %q", jobID, currentJob.State, JobStateProcessing)
 	}
+	if workerID != "" && (currentJob.WorkerID == nil || *currentJob.WorkerID != workerID) {
+		return nil, fmt.Errorf("job %q is owned by another worker", jobID)
+	}
 
 	now := time.Now().UTC().UnixMilli()
 	newAttempts := currentJob.Attempts + 1
@@ -304,7 +356,7 @@ func (s *Store) FinishJob(ctx context.Context, jobID string, exitCode int, stder
 		completedAt = &now
 	} else {
 		if newAttempts <= currentJob.MaxRetries {
-			newState = JobStatePending
+			newState = JobStateFailed
 			delayMs := retryDelay(currentJob.BackoffBase, newAttempts)
 			nextRun := now + delayMs.Milliseconds()
 			nextRunAt = &nextRun
@@ -424,12 +476,13 @@ func (s *Store) RetryDeadJob(ctx context.Context, id string) (*Job, error) {
 	return updatedJob, nil
 }
 
+// delay = base ^ attempt seconds
 func retryDelay(base, attempt int) time.Duration {
 	if attempt < 1 {
 		return 0
 	}
 	delay := 1
-	for i := 0; i < attempt-1; i++ {
+	for i := 0; i < attempt; i++ {
 		delay *= base
 	}
 	return time.Duration(delay) * time.Second
