@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"os"
 	"os/signal"
 	"syscall"
@@ -42,6 +43,9 @@ func newWorkerStartCommand(getenv func(string) string) *cobra.Command {
 				return fmt.Errorf("open store: %w", err)
 			}
 			defer s.Close()
+
+			logger := slog.New(slog.NewTextHandler(cmd.OutOrStderr(), nil))
+			slog.SetDefault(logger)
 
 			ctx, stop := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM)
 			defer stop()

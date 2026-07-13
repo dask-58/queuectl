@@ -4,6 +4,7 @@ package worker
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"os"
 	"time"
 
@@ -21,11 +22,17 @@ func Run(ctx context.Context, s *store.Store) (err error) {
 	workerID := uuid.NewString()
 	pid := os.Getpid()
 
-	if _, recErr := s.RecoverExpiredJobs(ctx); recErr != nil {
+	slog.Info("Worker started", "worker", workerID, "pid", pid)
+
+	recovered, recErr := s.RecoverExpiredJobs(ctx)
+	if recErr != nil {
 		if errors.Is(recErr, context.Canceled) || errors.Is(recErr, context.DeadlineExceeded) {
 			return nil
 		}
 		return recErr
+	}
+	if recovered > 0 {
+		slog.Info("Recovered abandoned job(s)", "worker", workerID, "count", recovered)
 	}
 
 	if err := s.RegisterWorker(ctx, workerID, pid); err != nil {
@@ -48,6 +55,7 @@ func Run(ctx context.Context, s *store.Store) (err error) {
 				err = unregErr
 			}
 		}
+		slog.Info("Worker stopped", "worker", workerID)
 	}()
 
 	for {
@@ -69,14 +77,19 @@ func Run(ctx context.Context, s *store.Store) (err error) {
 			return err
 		}
 		if stop {
+			slog.Info("Graceful shutdown requested", "worker", workerID)
 			return nil
 		}
 
-		if _, err := s.RecoverExpiredJobs(ctx); err != nil {
+		recovered, err = s.RecoverExpiredJobs(ctx)
+		if err != nil {
 			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 				return nil
 			}
 			return err
+		}
+		if recovered > 0 {
+			slog.Info("Recovered abandoned job(s)", "worker", workerID, "count", recovered)
 		}
 
 		job, claimErr := s.ClaimNextJob(ctx, workerID)
@@ -97,16 +110,33 @@ func Run(ctx context.Context, s *store.Store) (err error) {
 			return claimErr
 		}
 
+		slog.Info("Job claimed", "worker", workerID, "job", job.ID)
+		slog.Info("Job execution started", "worker", workerID, "job", job.ID, "command", job.Command)
+
+		start := time.Now()
 		exitCode, stderr, err := executor.Execute(context.Background(), *job)
+		duration := time.Since(start)
 		if err != nil {
 			return err
 		}
 
 		finishCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		_, err = s.FinishJobOwned(finishCtx, workerID, job.ID, exitCode, stderr)
+		finishedJob, err := s.FinishJobOwned(finishCtx, workerID, job.ID, exitCode, stderr)
 		cancel()
 		if err != nil {
 			return err
+		}
+
+		if finishedJob.State == store.JobStateCompleted {
+			slog.Info("Job completed", "worker", workerID, "job", job.ID, "duration", duration)
+		} else if finishedJob.State == store.JobStateFailed {
+			var retryIn time.Duration
+			if finishedJob.NextRunAt != nil {
+				retryIn = time.Until(time.UnixMilli(*finishedJob.NextRunAt)).Round(time.Second)
+			}
+			slog.Warn("Job failed", "worker", workerID, "job", job.ID, "exit_code", exitCode, "attempt", finishedJob.Attempts, "retry_in", retryIn)
+		} else if finishedJob.State == store.JobStateDead {
+			slog.Error("Job moved to DLQ", "worker", workerID, "job", job.ID, "exit_code", exitCode, "attempt", finishedJob.Attempts)
 		}
 	}
 }
