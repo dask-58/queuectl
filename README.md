@@ -7,7 +7,22 @@ QueueCTL is a Go CLI for running shell-command jobs from a persistent SQLite que
 > Read [DECISIONS.md](DECISIONS.md) for design decisions and reasoning.
 
 ## Demo Video Link
-[Video](https://youtu.be/-qdTUn0nVW0)
+
+> [!TIP]
+> Skip to 9:30 to avoid waiting for crash recovery part
+> \\
+> Excuse the background noise
+<div align="center">
+
+<a href="https://youtu.be/-qdTUn0nVW0">
+  <img src="https://img.youtube.com/vi/-qdTUn0nVW0/maxresdefault.jpg" alt="QueueCTL Demo Video" width="800">
+</a>
+
+<br>
+
+Click the thumbnail to watch the complete walkthrough.
+
+</div>
 
 ## How to Run
 
